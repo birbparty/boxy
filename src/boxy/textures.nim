@@ -1,17 +1,10 @@
 import buffers, opengl, pixie, vmath
+import backends/backend_interface
+
+# Re-export Filter and Wrap so existing callers (boxy.nim) don't need a new import.
+export Filter, Wrap
 
 type
-  Filter* = enum
-    filterDefault,
-    filterNearest = GL_NEAREST,
-    filterLinear = GL_LINEAR
-
-  Wrap* = enum
-    wDefault,
-    wRepeat = GL_REPEAT,
-    wClampToEdge = GL_CLAMP_TO_EDGE,
-    wMirroredRepeat = GL_MIRRORED_REPEAT
-
   Texture* = ref object
     width*, height*: int32
     componentType*, format*, internalFormat*: GLenum
@@ -21,6 +14,33 @@ type
     wrapS*, wrapT*, wrapR*: Wrap
     useMipmap*: bool
     textureId*: GLuint
+
+# ---------------------------------------------------------------------------
+# Filter / Wrap → GL constant converters
+#
+# backend_interface uses sequential ordinals (0,1,2) instead of GL constants.
+# These converters translate to the correct GLenum for glTexParameteri.
+# The filterDefault / wDefault paths are never reached because call sites
+# guard with != filterDefault / != wDefault before invoking glTexParameteri.
+# ---------------------------------------------------------------------------
+
+func toGLenum*(f: Filter): GLenum {.inline.} =
+  ## Map Filter to a GL constant for glTexParameteri.
+  ## filterDefault is a sentinel meaning "do not set" — call sites guard
+  ## with `!= filterDefault` before calling this. The arm returns GL_NEAREST
+  ## as a conservative fallback; it should never be reached.
+  case f:
+  of filterDefault, filterNearest: GL_NEAREST.GLenum
+  of filterLinear:                 GL_LINEAR.GLenum
+
+func toGLenum*(w: Wrap): GLenum {.inline.} =
+  ## Map Wrap to a GL constant for glTexParameteri.
+  ## wDefault is a sentinel meaning "do not set" — call sites guard
+  ## with `!= wDefault` before calling this. GL_REPEAT is the GL default.
+  case w:
+  of wDefault, wRepeat:   GL_REPEAT.GLenum
+  of wClampToEdge:        GL_CLAMP_TO_EDGE.GLenum
+  of wMirroredRepeat:     GL_MIRRORED_REPEAT.GLenum
 
 proc bindTextureBufferData*(texture: Texture, buffer: Buffer, data: pointer) =
   ## Binds data to a texture buffer.
@@ -56,13 +76,13 @@ proc bindTextureData*(texture: Texture, data: pointer, useMipmap = texture.useMi
 
   if texture.magFilter != filterDefault:
     glTexParameteri( # default is GL_LINEAR
-      GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, texture.magFilter.GLint
+      GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, texture.magFilter.toGLenum.GLint
     )
   if not texture.useMipmap:
     glTexParameteri( # default is GL_NEAREST_MIPMAP_LINEAR, but we don't use mipmaps
       GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
       if texture.minFilter == filterDefault: GL_NEAREST
-      else: texture.minFilter.GLint
+      else: texture.minFilter.toGLenum.GLint
     )
   elif texture.minFilter != filterDefault or texture.mipFilter != filterDefault:
     glTexParameteri( # default is GL_NEAREST_MIPMAP_LINEAR
@@ -79,11 +99,11 @@ proc bindTextureData*(texture: Texture, data: pointer, useMipmap = texture.useMi
     )
 
   if texture.wrapS != wDefault:
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, texture.wrapS.GLint)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, texture.wrapS.toGLenum.GLint)
   if texture.wrapT != wDefault:
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, texture.wrapT.GLint)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, texture.wrapT.toGLenum.GLint)
   if texture.wrapR != wDefault:
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, texture.wrapR.GLint)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, texture.wrapR.toGLenum.GLint)
 
   if useMipmap:
     glGenerateMipmap(GL_TEXTURE_2D)
