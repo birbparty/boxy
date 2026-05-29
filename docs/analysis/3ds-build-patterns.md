@@ -17,7 +17,7 @@ Nim resolves cross-compilers via `$cpu.$os.$cc.exe`. For 3DS: `arm.linux.gcc.exe
 - `-specs=3dsx.specs`: devkitARM linker spec for 3DS format; defines startup code location
 - `-march=armv6k -mtune=mpcore`: ARM11 MPCore (3DS primary CPU)
 - `-mfloat-abi=hard`: Hard-float ABI (hardware FPU)
-- `-mtp=soft`: Soft TLS, required by libctru
+- `-mtp=soft`: Software thread-pointer access (emits `__aeabi_read_tp` call instead of reading the `CP15`/`TPIDRURO` hardware register); the 3DS userland cannot read the hardware TP register on ARMv6k
 - `-I/opt/devkitpro/libctru/include`: Standard libctru SDK headers
 
 ### Linker Flags (passL)
@@ -46,6 +46,8 @@ elif defined(ds3):
 
 All three platforms (PSP, 3DS, Vita) share identical memory settings. ARC avoids mmap dependency.
 
+**Important:** The reference build script (`scripts/build_3ds.sh:28`) passes `--opt:none` on the CLI: `nim c -d:ds3 -d:release --opt:none ...`. The CLI flag overrides `opt:size` from config.nims. The reference project builds with **no optimization** — the explicit `--opt:none` strongly implies `-Os` caused a miscompile on this toolchain. Verify whether `-Os` works for boxy before relying on the config value.
+
 ## Build Pipeline (scripts/build_3ds.sh)
 
 ```bash
@@ -58,20 +60,29 @@ export PATH="$DEVKITPRO/tools/bin:$DEVKITARM/bin:$PATH"
 cp nim_3ds.cfg nim.cfg
 "$DEVKITARM/bin/arm-none-eabi-ar" rcs libdl.a
 
-# 3. Compile
-nim c -d:ds3 -d:release src/main.nim
+# 3. Compile (produces linked ELF; Nim names it after the module, no extension)
+#    The reference uses --opt:none to override opt:size (likely a codegen workaround)
+nim c -d:ds3 -d:release --opt:none src/idle_clicker.nim  # adapt entrypoint for boxy
 
-# 4. SMDH metadata (icons: 48x48 and 24x24)
+# 4. SMDH metadata
+#    Icons must exist first — the reference generates them from a sprite sheet:
+#    magick assets/sprite.png -crop 128x128+0+0 +repage -resize 48x48 icon48.png
+#    magick assets/sprite.png -crop 128x128+0+0 +repage -resize 24x24 icon24.png
 smdhtool --create "Title" "Description" "Author" icon48.png out.smdh icon24.png
 
 # 5. RomFS asset packing
 mkromfs3ds romfs_dir/ out.romfs
 
-# 6. Package
-3dsxtool src/main out.3dsx --smdh=out.smdh --romfs=out.romfs
+# 6. Package — input is the ELF produced by step 3
+3dsxtool src/idle_clicker out.3dsx --smdh=out.smdh --romfs=out.romfs
+
+# Cleanup — the reference uses trap EXIT to remove stray files:
+#   trap 'rm -f nim.cfg libdl.a out.romfs out.smdh icon48.png icon24.png' EXIT
+# This matters: cp nim_3ds.cfg nim.cfg leaves nim.cfg in the tree and
+# would poison subsequent desktop builds if not removed.
 ```
 
-RomFS assets mounted at `/romfs/` at runtime.
+RomFS assets mounted at `romfs:/` at runtime (devoptab device prefix, e.g. `"romfs:/assets/image.png"`). Not a Unix path — the colon is the devoptab separator.
 
 ## FFI Binding Patterns (raylib_console.nim)
 
@@ -111,7 +122,7 @@ Always use explicit `float32`, not `float`, for C ABI correctness.
 
 1. Nim config is minimal — complexity is acquiring the correct raylib port (Nintendo-Raylib) and devkitARM paths
 2. Memory settings (ARC + malloc + no-signals) are identical to PSP/Vita
-3. Thin `{.importc.}` bindings work without naylib
+3. Thin `{.importc.}` bindings work without naylib on console targets — the reference gates the import (`when defined(ds3) or psp or vita: import raylib_console`); desktop/emscripten paths still use naylib
 4. nim_3ds.cfg hardcodes project-specific paths — boxy should use env vars or documented setup steps
 5. `libdl.a` stub trick is the standard workaround for `-ldl` on Linux targets
 6. Build pipeline steps are deterministic and scriptable

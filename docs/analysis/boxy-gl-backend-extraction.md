@@ -36,9 +36,9 @@ These three exports are defined in `blends.nim` using the shady DSL and must be 
 
 **Emscripten-only guard (lines 202–260):** Shader compilation switches GLSL version (`"410"` vs `"300 es"`) and precision header. This is the only conditional in the entire import graph.
 
-## The grow() Procedure: GPU FBO Blit
+## The grow() Procedure: GPU FBO Blit + CPU Tile Bookkeeping
 
-`grow()` (lines 384–496) doubles the atlas texture size. It is a **pure GPU FBO blit** — no CPU image data is involved. Required steps in order:
+`grow()` (lines 384–496) doubles the atlas texture size. The **success path is a GPU FBO blit followed by CPU tile-index bookkeeping**. Required steps in order:
 
 1. Flush pending vertex data
 2. Create larger atlas texture
@@ -54,6 +54,10 @@ These three exports are defined in `blends.nim` using the shady DSL and must be 
 12. Restore saved GPU state
 13. Delete temporary FBO
 14. Delete old texture
+15. Rebuild `takenTiles` BitArray (CPU)
+16. Remap every tile's atlas index from old tile-run to new tile-run (CPU) — essential for correctness; omitting this corrupts the atlas
+
+**max-size error branch (lines 386–399):** When `atlasSize == maxAtlasSize`, grow() calls `atlasTexture.writeFile("tmp/atlas.png")` — a pixie/file-I/O CPU path — before raising `BoxyError`. This branch is guarded `when not defined(emscripten)` but **not** for `ds3`, so it must be explicitly guarded or removed in the 3DS build. (See `emscripten-pattern.md` Block 4.)
 
 This is the most complex backend operation — it requires full FBO support.
 
@@ -72,9 +76,9 @@ A platform-agnostic backend must expose these abstractions:
 - `bindTexture(unit, id)` / `deleteTexture(id)`
 - `setTextureFilter(id, min, mag, useMipmap)` / `setTextureWrap(id, s, t, r)`
 - `uploadTextureData(id, data, format, type, genMipmap)`
-- `updateTextureSubregion(id, x, y, w, h, data, format, type, mipmapLevel)`
+- `updateTextureSubregion(id, x, y, w, h, data, format, type, mipmapLevel)` — note: the mipmap chain is currently generated CPU-side by pixie `minifyBy2()` in `textures.nim:updateSubImage`; removing pixie requires either a non-pixie CPU minify or GPU mip generation (`glGenerateMipmap`)
 - `clearTextureSubregion(id, x, y, w, h, level)`
-- `downloadTextureData(id) -> ByteArray` (GPU→CPU; disabled on limited platforms)
+- `downloadTextureData(id) -> ByteArray` — **not implementable on citro3d** (no `glGetTexImage` analog); on 3DS this must raise or be removed at compile time, matching the emscripten `readImage` exception. Affects `readAtlas` (`boxy.nim:76`) and `getImage`/layer readback (`boxy.nim:1169`)
 
 ### Buffers
 - `createBuffer(target, componentType, kind) -> BufferId`
@@ -94,10 +98,11 @@ A platform-agnostic backend must expose these abstractions:
 
 ## State Invariants
 
-- **Blend mode:** Always `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` (premultiplied alpha)
+- **Blend mode:** Default draw state is `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` (premultiplied alpha). Intermediate passes (grow's atlas blit at step 9, mask/blur passes) disable or change blending — the interface's `enableBlending(bool)` / `setBlendMode(src, dst)` exist precisely for this.
 - **Texture units:** Slot 0 = atlas, Slot 1 = optional blend destination
 - **Projection:** Passed to each shader via `setUniform("proj", ...)`
 - **Framebuffer:** Screen or one layer texture at a time
+- **Raw-GL escape hatch:** `enterRawOpenGLMode` / `exitRawOpenGLMode` are public APIs. `enterRawOpenGLMode` only flushes pending draws. `exitRawOpenGLMode` (boxy.nim:342–358) re-binds VAO, buffers, attribs, framebuffer, and blend state via raw GL calls — this is where the state contract lives. A citro3d backend must either honor this restore sequence or explicitly remove the API.
 
 ## Not Needed in Backend
 

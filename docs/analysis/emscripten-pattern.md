@@ -61,7 +61,7 @@ One-line skip of `atlasTexture.writeFile()` on Emscripten. No semantic impact.
 
 **The Boxy type (boxy.nim:31–62):** All fields (`GLuint`, `Texture`, `Buffer`, shader handles) are always present. No platform variants.
 
-**`enterRawOpenGLMode`/`exitRawOpenGLMode` (boxy.nim:338–358):** Raw GL calls (`glBindVertexArray`, `glBindBuffer`, `glBindFramebuffer`, `glBlendFunc`). Not guarded. Work on Emscripten only because WebGL accepts the same API surface.
+**`enterRawOpenGLMode` (boxy.nim:338):** Contains only `boxy.flush()` — no raw GL calls. **`exitRawOpenGLMode` (boxy.nim:342–358):** Contains all the raw GL calls: `glBindVertexArray`, `glBindBuffer`, `glBindFramebuffer`, `glBlendFunc`, `glEnable(GL_BLEND)`, and `bindAttrib` calls that restore boxy's VAO/buffer/attrib/framebuffer/blend state. Neither proc is guarded. They work on Emscripten because WebGL accepts the same API surface. The restore-side (`exitRawOpenGLMode`) is where the GL state contract lives — the relevant detail for a backend author replicating raw-mode semantics on citro3d.
 
 ## Why Emscripten Works But 3DS Cannot Follow the Same Pattern
 
