@@ -2,6 +2,7 @@
 ##
 ## Binds: C3D_Init/Fini, texture management (C3D_Tex), render targets,
 ## TEV stage configuration, attribute/buffer info, alpha blending, draw calls.
+## Also binds libctru linearAlloc/linearFree for DMA-accessible CPU buffers.
 ##
 ## Header: <citro3d.h> (at /opt/devkitpro/libctru/include/citro3d.h).
 ## The -I path is injected by nim_3ds.cfg which scripts/build_3ds.sh copies to nim.cfg.
@@ -387,3 +388,18 @@ proc c3dFixedAttribSet*(id: int32, x, y, z, w: float32)
 
 proc c3dFVUnifMtx4x4*(typ: GpuShaderType, id: int32, mtx: ptr C3D_Mtx)
   {.importc: "C3D_FVUnifMtx4x4", header: "citro3d.h".}
+
+# ---------------------------------------------------------------------------
+# Linear (DMA-accessible) memory allocator
+#
+# C3D_TexLoadImage (called by C3D_TexUpload) uses GX_DisplayTransfer to DMA
+# data into VRAM. The DMA engine requires the source buffer to reside in
+# linear memory allocated by linearAlloc — NOT in the Nim GC heap.
+# Header: <3ds/allocator/linear.h>, included transitively by <3ds.h>.
+# ---------------------------------------------------------------------------
+
+proc linearAlloc*(size: csize_t): pointer
+  {.importc: "linearAlloc", header: "<3ds.h>".}
+
+proc linearFree*(mem: pointer)
+  {.importc: "linearFree", header: "<3ds.h>".}

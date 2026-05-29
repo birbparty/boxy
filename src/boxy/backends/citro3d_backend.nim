@@ -3,7 +3,7 @@
 ## Provides:
 ##   - swizzleTileIntoAtlas: Morton/Z-order tile writer for GPU_RGBA8 uploads
 ##   - mortonIdx, pixieRgbaToGpuAbgr: exported helpers (unit-testable on host)
-##   - Citro3dBackend: stub Backend subtype (ds3-only, further impl in boxy-avl)
+##   - Citro3dBackend: Backend subtype implementing atlas texture management
 ##
 ## The swizzle utility has no citro3d dependency and compiles on any platform.
 ## The Citro3dBackend type requires --define:ds3.
@@ -95,10 +95,11 @@ proc swizzleTileIntoAtlas*(
       dst32[dstIdx] = pixieRgbaToGpuAbgr(src32[sy * srcW + sx])
 
 # ---------------------------------------------------------------------------
-# Citro3dBackend — stub Backend implementation for Nintendo 3DS
+# Citro3dBackend — Backend implementation for Nintendo 3DS
 #
-# Only compiled when --define:ds3 is active. See boxy-avl and follow-on
-# tasks for atlas texture management, quad batching, and TEV configuration.
+# Only compiled when --define:ds3 is active.
+# Atlas texture management (boxy-avl): implemented here.
+# Render targets, quad batching, TEV: follow-on tasks (boxy-z5d and beyond).
 # ---------------------------------------------------------------------------
 
 when defined(ds3):
@@ -106,52 +107,148 @@ when defined(ds3):
   import ../bindings/citro3d
   export citro3d
 
+  # ---------------------------------------------------------------------------
+  # VRAM budget for the PICA200 GPU:
+  #
+  #   PICA200 VRAM total:                          ≈6 MB (6,291,456 bytes)
+  #   GPU_RGBA8 atlas at 512×512:                   1 MB (1,048,576 bytes)
+  #   GPU_RGBA8 atlas at 1024×1024:                 4 MB (4,194,304 bytes)
+  #   RTT layer pair, top screen (512×256 POT):     0.5 MB × 2 = 1 MB
+  #   RTT layer pair, bottom screen (512×256 POT):  0.5 MB × 2 = 1 MB
+  #
+  # Cap: maxAtlasSize = 1024.
+  #   Worst-case: 1024² atlas (4 MB) + two RTT pairs (2 MB) = 6 MB total.
+  #   The boxy atlas starts at 512×512 and grows by doubling; a third grow
+  #   to 2048² would require 16 MB and is disallowed by this cap.
+  # ---------------------------------------------------------------------------
+
+  const maxAtlasSize* = 1024
+    ## Maximum atlas side length enforced by createAtlasTexture.
+    ## See VRAM budget comment above.
+
+  const maxTexSlots = 16
+
   type
+    TexSlot = object
+      tex: C3D_Tex
+      mirror: pointer   ## linearAlloc buffer; size = sideLen*sideLen*4 bytes
+      sideLen: int
+      used: bool
+
     Citro3dBackend* = ref object of Backend
       ## Nintendo 3DS citro3d rendering backend.
-      ## Atlas texture management: boxy-avl.
-      ## Quad batching + TEV: follow-on tasks.
+      ## Atlas texture management implemented; quad batching / TEV in follow-on tasks.
+      texSlots: array[maxTexSlots, TexSlot]
 
   proc newCitro3dBackend*(): Citro3dBackend =
-    result = Citro3dBackend()
+    Citro3dBackend()
 
-  method createAtlasTexture*(backend: Citro3dBackend, size: int): TextureHandle =
-    raise newException(BackendError, "createAtlasTexture: not yet implemented (boxy-avl)")
+  proc allocTexSlot(b: Citro3dBackend): int =
+    for i in 0 ..< maxTexSlots:
+      if not b.texSlots[i].used:
+        return i
+    raise newException(BackendError,
+      "no free texture slots (maxTexSlots=" & $maxTexSlots & ")")
 
-  method deleteTexture*(backend: Citro3dBackend, handle: TextureHandle) =
-    raise newException(BackendError, "deleteTexture: not yet implemented (boxy-avl)")
+  # ---------------------------------------------------------------------------
+  # createAtlasTexture
+  # ---------------------------------------------------------------------------
 
-  method createLayerTarget*(backend: Citro3dBackend,
-      width, height: int32): tuple[tex: TextureHandle, rt: RenderTargetHandle] =
-    raise newException(BackendError, "createLayerTarget: not yet implemented (boxy-avl)")
+  method createAtlasTexture*(b: Citro3dBackend, size: int): TextureHandle =
+    ## Allocate a square GPU_RGBA8 atlas texture of `size` pixels per side in
+    ## VRAM. `size` must be a power-of-two value in [512, maxAtlasSize].
+    ##
+    ## VRAM is required (not C3D_TexInit) because the atlas must serve as both
+    ## a sample source and a render target for blitAtlasToNewAtlas (boxy-z5d).
+    doAssert (size and (size - 1)) == 0 and size >= 512 and size <= maxAtlasSize,
+      "atlas size must be a power-of-two in [512, " & $maxAtlasSize & "], got " & $size
+    let i = b.allocTexSlot()
+    let ok = c3dTexInitVram(addr b.texSlots[i].tex, uint16(size), uint16(size), GPU_RGBA8)
+    doAssert ok, "C3D_TexInitVRAM failed for " & $size & "×" & $size
+    let bytes = csize_t(size * size * 4)
+    b.texSlots[i].mirror = linearAlloc(bytes)
+    doAssert b.texSlots[i].mirror != nil,
+      "linearAlloc failed for atlas mirror (" & $bytes & " bytes)"
+    zeroMem(b.texSlots[i].mirror, bytes)
+    b.texSlots[i].sideLen = size
+    b.texSlots[i].used    = true
+    TextureHandle(id: i + 1, width: int32(size), height: int32(size))
 
-  method bindTarget*(backend: Citro3dBackend, dst: RenderTargetHandle) =
-    raise newException(BackendError, "bindTarget: not yet implemented (boxy-avl)")
+  # ---------------------------------------------------------------------------
+  # deleteTexture
+  # ---------------------------------------------------------------------------
 
-  method uploadTile*(backend: Citro3dBackend, handle: TextureHandle,
+  method deleteTexture*(b: Citro3dBackend, handle: TextureHandle) =
+    if not handle.isAllocated: return
+    let i = handle.id - 1
+    if not b.texSlots[i].used: return
+    c3dTexDelete(addr b.texSlots[i].tex)
+    linearFree(b.texSlots[i].mirror)
+    b.texSlots[i].mirror  = nil
+    b.texSlots[i].sideLen = 0
+    b.texSlots[i].used    = false
+
+  # ---------------------------------------------------------------------------
+  # uploadTile
+  # ---------------------------------------------------------------------------
+
+  method uploadTile*(b: Citro3dBackend, handle: TextureHandle,
       x, y: int, image: Image, level: int) =
-    raise newException(BackendError, "uploadTile: not yet implemented (boxy-avl)")
+    ## Swizzle `image` into the atlas CPU mirror at (x, y), then DMA the full
+    ## mirror into VRAM via C3D_TexUpload.
+    ##
+    ## level > 0 is a no-op — PICA200 atlas textures are single-level.
+    ##
+    ## DMA note: the mirror is allocated with linearAlloc so the GX DMA engine
+    ## can access it; Nim GC-heap allocations are NOT DMA-accessible on 3DS.
+    ##
+    ## Whole-atlas upload on each call is intentional scaffolding: blitAtlasToNewAtlas
+    ## (boxy-z5d) will render directly into VRAM, making the CPU mirror write-only
+    ## between grow() calls. A partial-upload optimisation can follow once the
+    ## full atlas pipeline is in place.
+    if level != 0: return
+    doAssert handle.isAllocated, "uploadTile: handle not allocated"
+    let i = handle.id - 1
+    doAssert b.texSlots[i].used, "uploadTile: handle refers to freed texture"
+    let side = b.texSlots[i].sideLen
+    swizzleTileIntoAtlas(
+      cast[ptr uint8](unsafeAddr image.data[0]),
+      image.width, image.height,
+      cast[ptr uint8](b.texSlots[i].mirror),
+      side, side div 8, x, y)
+    c3dTexUpload(addr b.texSlots[i].tex, b.texSlots[i].mirror)
 
-  method flush*(backend: Citro3dBackend) =
-    raise newException(BackendError, "flush: not yet implemented (boxy-avl)")
+  # ---------------------------------------------------------------------------
+  # Stubs for follow-on tasks
+  # ---------------------------------------------------------------------------
 
-  method beginAtlasTarget*(backend: Citro3dBackend, atlas: TextureHandle) =
-    raise newException(BackendError, "beginAtlasTarget: not yet implemented (boxy-avl)")
+  method createLayerTarget*(b: Citro3dBackend,
+      width, height: int32): tuple[tex: TextureHandle, rt: RenderTargetHandle] =
+    raise newException(BackendError, "createLayerTarget: not yet implemented (boxy-z5d)")
 
-  method endAtlasTarget*(backend: Citro3dBackend, atlas: TextureHandle) =
-    raise newException(BackendError, "endAtlasTarget: not yet implemented (boxy-avl)")
+  method bindTarget*(b: Citro3dBackend, dst: RenderTargetHandle) =
+    raise newException(BackendError, "bindTarget: not yet implemented (boxy-z5d)")
 
-  method blitAtlasToNewAtlas*(backend: Citro3dBackend,
+  method flush*(b: Citro3dBackend) =
+    raise newException(BackendError, "flush: not yet implemented (boxy-z5d)")
+
+  method beginAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
+    raise newException(BackendError, "beginAtlasTarget: not yet implemented (boxy-z5d)")
+
+  method endAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
+    raise newException(BackendError, "endAtlasTarget: not yet implemented (boxy-z5d)")
+
+  method blitAtlasToNewAtlas*(b: Citro3dBackend,
       old, `new`: TextureHandle) =
-    raise newException(BackendError, "blitAtlasToNewAtlas: not yet implemented (boxy-avl)")
+    raise newException(BackendError, "blitAtlasToNewAtlas: not yet implemented (boxy-z5d)")
 
-  method compositeLayer*(backend: Citro3dBackend,
+  method compositeLayer*(b: Citro3dBackend,
       src: TextureHandle,
       dst: RenderTargetHandle,
       dstTexture: TextureHandle,
       blendMode: BlendMode, tint: Color,
       frameSize: IVec2, atlasSize: int) =
-    raise newException(BackendError, "compositeLayer: not yet implemented (boxy-avl)")
+    raise newException(BackendError, "compositeLayer: not yet implemented (boxy-z5d)")
 
-  method restoreState*(backend: Citro3dBackend, s: BackendStateSnapshot) =
-    raise newException(BackendError, "restoreState: not yet implemented (boxy-avl)")
+  method restoreState*(b: Citro3dBackend, s: BackendStateSnapshot) =
+    raise newException(BackendError, "restoreState: not yet implemented (boxy-z5d)")
