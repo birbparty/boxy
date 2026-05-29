@@ -31,7 +31,7 @@ export backend_interface
 # the atlas in a way that looks like an offset bug, not a geometry bug.
 # ---------------------------------------------------------------------------
 
-const mortonTable* = [0, 1, 4, 5, 16, 17, 20, 21]
+const mortonTable = [0, 1, 4, 5, 16, 17, 20, 21]
   ## Spread table: mortonTable[i] deposits bit-0 of i at bit-0, bit-1 at bit-2,
   ## bit-2 at bit-4 (leaving odd positions zero for the y-axis interleave).
   ## Values verified against the cycle table in tex3ds source/swizzle.cpp.
@@ -44,8 +44,8 @@ func mortonIdx*(x, y: int): int {.inline.} =
 
 func pixieRgbaToGpuAbgr*(rgba: uint32): uint32 {.inline.} =
   ## Convert Pixie ColorRGBX uint32 (bytes R,G,B,A) to PICA200 GPU_RGBA8
-  ## uint32 (bytes A,B,G,R). Both representations are 4×uint8 packed little-
-  ## endian; the conversion is a 32-bit byte reversal (bswap32).
+  ## uint32 (bytes A,B,G,R). The value-level byte-significance reversal with
+  ## same-endian read and write produces an in-memory byte reversal on any host.
   ## Reference: tex3ds source/encode.cpp rgba8888() outputs Alpha first.
   ((rgba and 0xFF000000'u32) shr 24) or
   ((rgba and 0x00FF0000'u32) shr  8) or
@@ -58,15 +58,23 @@ proc swizzleTileIntoAtlas*(
     atlasW, atlasStride, dstX, dstY: int) =
   ## Copy a linear Pixie RGBA8 source image into a Morton-tiled GPU_RGBA8 atlas.
   ##
-  ## src       : source pixel data (Pixie ColorRGBX, R at byte 0)
-  ## srcW/srcH : source dimensions in pixels
-  ## dstAtlas  : destination atlas buffer in PICA200 GPU_RGBA8 Morton layout
-  ## atlasW    : atlas width in pixels (power of 2, multiple of 8, ≤ 1024)
-  ## atlasStride: block columns per row = atlasW / 8 (NOT atlasW; caller computes)
-  ## dstX/dstY : destination top-left in atlas pixel coordinates (need not be
-  ##             multiples of 8; block and within-block indices computed per pixel)
+  ## src        : source pixel data (Pixie ColorRGBX, R at byte 0); must be
+  ##              tightly packed — row stride == srcW (sub-image views not supported)
+  ## srcW/srcH  : source dimensions in pixels
+  ## dstAtlas   : destination atlas buffer in PICA200 GPU_RGBA8 Morton layout
+  ## atlasW     : atlas width in pixels (power of 2, multiple of 8, ≤ 1024)
+  ## atlasStride: block columns per row = atlasW / 8 (caller precomputes for the loop)
+  ## dstX/dstY  : destination top-left in atlas pixel coordinates (need not be
+  ##              multiples of 8; block and within-block indices computed per pixel)
   ##
   ## Each pixel is Morton-placed and byte-swapped (Pixie RGBA → PICA200 ABGR).
+  assert atlasStride == atlasW div 8,
+    "atlasStride must equal atlasW div 8; mismatch silently garbles block layout"
+  assert dstX >= 0 and dstY >= 0 and srcW > 0 and srcH > 0
+  assert dstX + srcW <= atlasW,
+    "tile right edge overruns atlas width: " & $(dstX + srcW) & " > " & $atlasW
+  assert dstY + srcH <= atlasStride * 8,
+    "tile bottom edge overruns atlas height: " & $(dstY + srcH) & " > " & $(atlasStride * 8)
   let src32 = cast[ptr UncheckedArray[uint32]](src)
   let dst32 = cast[ptr UncheckedArray[uint32]](dstAtlas)
 
@@ -94,6 +102,7 @@ proc swizzleTileIntoAtlas*(
 # ---------------------------------------------------------------------------
 
 when defined(ds3):
+  import pixie, vmath             # Image, BlendMode, Color (pixie re-exports chroma), IVec2
   import ../bindings/citro3d
   export citro3d
 

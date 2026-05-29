@@ -210,4 +210,44 @@ block:
   # (1,1): mortonIdx(1,1)=3, GPU bytes A=10,B=0F,G=0E,R=0D
   assertMsg(dst[3*4+0] == 0x10 and dst[3*4+3] == 0x0D, "2x2 pixel(1,1)")
 
+# ---------------------------------------------------------------------------
+# Part 4: mortonIdx completeness — all 64 (x,y) in [0,7]² yield a permutation
+# of [0,63]. Catches any table typo that slips past the spot-check cases above.
+# ---------------------------------------------------------------------------
+
+block:
+  var seen: array[64, bool]
+  for y in 0..7:
+    for x in 0..7:
+      let idx = mortonIdx(x, y)
+      assertMsg(idx >= 0 and idx < 64, "mortonIdx(" & $x & "," & $y & ") in [0,63]")
+      assertMsg(not seen[idx],
+        "mortonIdx(" & $x & "," & $y & ")=" & $idx & " is unique (no collision)")
+      seen[idx] = true
+  var allPresent = true
+  for i in 0..63:
+    if not seen[i]:
+      allPresent = false
+      break
+  assertMsg(allPresent, "mortonIdx over [0,7]² is a permutation of [0,63]")
+
+# ---------------------------------------------------------------------------
+# Part 5: atlas-edge placement — pixel at the bottom-right corner of a 16×16
+# atlas ((15, 15)) must land in the correct Morton slot without OOB write.
+# ---------------------------------------------------------------------------
+
+block:
+  var src: array[4, uint8] = [0xFE'u8, 0xFD, 0xFC, 0xFB]  # R,G,B,A
+  var dst: array[ATLAS_BYTES, uint8]
+
+  swizzleTileIntoAtlas(src[0].addr, 1, 1, dst[0].addr, ATLAS_W, ATLAS_STRIDE, 15, 15)
+
+  # px=15, py=15: blockX=1, blockY=1, withinX=7, withinY=7
+  # mortonIdx(7,7) = 63
+  # blockIndex = 1 * 2 + 1 = 3
+  # dstIdx = 3 * 64 + 63 = 255
+  let off = 255 * 4
+  assertMsg(dst[off + 0] == 0xFB, "bottom-right corner: byte0=A")
+  assertMsg(dst[off + 3] == 0xFE, "bottom-right corner: byte3=R")
+
 echo "ALL TESTS PASSED"
