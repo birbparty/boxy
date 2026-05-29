@@ -3,7 +3,7 @@
 ## Binds:
 ##   libctru GFX:    gfxInitDefault, gfxSwapBuffers, gfxExit, gfxSet3D
 ##   DVLB/shader:    DVLB_ParseFile, DVLE_GetUniformRegister, shaderProgramInit,
-##                   shaderProgramSetVsh, shaderProgramBind, shaderProgramFree
+##                   shaderProgramSetVsh, shaderProgramUse, shaderProgramFree
 ##   APT:            aptMainLoop
 ##   OS/SVC:         svcSleepThread
 ##
@@ -17,23 +17,30 @@
 when not defined(ds3):
   {.error: "libctru_gfx.nim must be compiled with --define:ds3 (use scripts/build_3ds.sh)".}
 
+import shader_types
+export shader_types
+
 # ---------------------------------------------------------------------------
 # DVLB / DVLE shader binary types (from <3ds/gpu/shbin.h>)
 #
-# Opaque structs — all interactions go through C functions.
-# DVLP_s and DVLE_s are nested inside DVLB_s; we expose only what callers need.
+# DVLB_s is declared with the DVLE and numDVLE fields exposed so the backend
+# can do dvlb.DVLE[0] to retrieve the vertex-shader DVLE_s entry. DVLP_s
+# (the program binary container) is left opaque — callers never access it.
 # ---------------------------------------------------------------------------
 
 type
   DVLP_s* {.importc: "DVLP_s", header: "<3ds/gpu/shbin.h>".} = object
-  DVLE_s* {.importc: "DVLE_s", header: "<3ds/gpu/shbin.h>".} = object
-  DVLB_s* {.importc: "DVLB_s", header: "<3ds/gpu/shbin.h>".} = object
 
-  ## Full shaderProgram_s — also forward-declared in citro3d.nim.
-  ## If both modules are imported, the importc pragma guarantees they map to
-  ## the same C type; Nim type-checks them as the same symbol.
-  ShaderProgram_s* {.importc: "shaderProgram_s",
-                     header: "<3ds/gpu/shaderProgram.h>".} = object
+  ## DVLB shader binary. Obtain via dvlbParseFile; free with dvlbFree.
+  ## dvlb.DVLE[0] is the vertex shader entry (assuming a single-DVLE shbin).
+  DVLB_s* {.importc: "DVLB_s", header: "<3ds/gpu/shbin.h>".} = object
+    numDVLE* {.importc: "numDVLE".}: uint32    ## number of DVLE entries
+    DVLE* {.importc: "DVLE".}: ptr DVLE_s      ## pointer to the DVLE array
+
+# ShaderProgram_s and DVLE_s are imported from shader_types.nim — the single
+# nominal type declaration shared by both this module and citro3d.nim.
+# This ensures that a ShaderProgram_s from shaderProgramInit can be passed
+# directly to c3dBindProgram without a cast.
 
 # ---------------------------------------------------------------------------
 # GFX lifecycle (from <3ds/gfx.h>)
@@ -55,7 +62,7 @@ proc gfxSet3D*(enable: bool)
 # DVLB shader binary parsing (from <3ds/gpu/shbin.h>)
 #
 # DVLB_ParseFile parses a .shbin blob produced by picasso into a DVLB_s.
-# The returned pointer is heap-allocated; free with DVLB_Free when done.
+# The returned pointer is heap-allocated; free with dvlbFree when done.
 # shbinData must remain valid for the lifetime of the DVLB_s.
 # ---------------------------------------------------------------------------
 
@@ -65,7 +72,7 @@ proc dvlbParseFile*(shbinData: ptr uint32, shbinSize: uint32): ptr DVLB_s
 proc dvlbFree*(dvlb: ptr DVLB_s)
   {.importc: "DVLB_Free", header: "<3ds/gpu/shbin.h>".}
 
-## Returns the index of a uniform register by name, or -1 if not found.
+## Returns the uniform register index by name, or -1 if not found.
 proc dvleGetUniformRegister*(dvle: ptr DVLE_s, name: cstring): int8
   {.importc: "DVLE_GetUniformRegister", header: "<3ds/gpu/shbin.h>".}
 
@@ -73,15 +80,19 @@ proc dvleGetUniformRegister*(dvle: ptr DVLE_s, name: cstring): int8
 # Shader program management (from <3ds/gpu/shaderProgram.h>)
 #
 # Typical usage:
-##   var prog: ShaderProgram_s
-##   discard shaderProgramInit(prog.addr)
-##   discard shaderProgramSetVsh(prog.addr, dvlb.DVLE)   # first DVLE entry
-##   shaderProgramBind(prog.addr)   # via c3dBindProgram
-##   ...
-##   discard shaderProgramFree(prog.addr)
+#   var dvlb = dvlbParseFile(shbinData, shbinSize)
+#   var prog: ShaderProgram_s
+#   discard shaderProgramInit(prog.addr)
+#   discard shaderProgramSetVsh(prog.addr, dvlb.DVLE[0])  # first DVLE entry
+#   c3dBindProgram(prog.addr)   # citro3d.nim proc, same ShaderProgram_s type
+#   ...
+#   discard shaderProgramFree(prog.addr)
+#   dvlbFree(dvlb)
+#
+# All procs return a libctru Result code (0 = success). Callers should check
+# the return value rather than discarding it in production code.
 # ---------------------------------------------------------------------------
 
-## Returns a libctru Result code (0 = success).
 proc shaderProgramInit*(sp: ptr ShaderProgram_s): int32
   {.importc: "shaderProgramInit", header: "<3ds/gpu/shaderProgram.h>".}
 
@@ -91,16 +102,16 @@ proc shaderProgramFree*(sp: ptr ShaderProgram_s): int32
 proc shaderProgramSetVsh*(sp: ptr ShaderProgram_s, dvle: ptr DVLE_s): int32
   {.importc: "shaderProgramSetVsh", header: "<3ds/gpu/shaderProgram.h>".}
 
-## shaderProgramUse = shaderProgramConfigure(true, true) + upload DVLE consts.
-## Equivalent to what C3D_BindProgram does internally for the active program.
+## shaderProgramUse = shaderProgramConfigure(true, true) + upload DVLE constants.
+## Alternative to c3dBindProgram when the program is not yet active.
 proc shaderProgramUse*(sp: ptr ShaderProgram_s): int32
   {.importc: "shaderProgramUse", header: "<3ds/gpu/shaderProgram.h>".}
 
 # ---------------------------------------------------------------------------
 # APT (Application Manager) — from <3ds/services/apt.h>
 #
-# aptMainLoop returns false when the HOME button closes the app; the main
-# loop should exit when it returns false.
+# aptMainLoop returns false when the HOME button requests app exit; the main
+# loop should terminate when it returns false.
 # ---------------------------------------------------------------------------
 
 proc aptMainLoop*(): bool

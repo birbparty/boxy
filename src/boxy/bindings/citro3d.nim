@@ -12,13 +12,16 @@
 when not defined(ds3):
   {.error: "citro3d.nim must be compiled with --define:ds3 (use scripts/build_3ds.sh)".}
 
+import shader_types
+export shader_types
+
 # ---------------------------------------------------------------------------
 # GPU enum types and constants
 #
 # C uses C-enums that decay to int in function calls.
 # Nim models them as distinct int32 so callers get type safety without casts
 # at the call sites (Nim accepts same distinct type at matching params).
-# Values are copied verbatim from /opt/devkitpro/libctru/include/3ds/gpu/enums.h.
+# Values verified against /opt/devkitpro/libctru/include/3ds/gpu/enums.h.
 # ---------------------------------------------------------------------------
 
 type
@@ -37,47 +40,57 @@ type
   Gfx3dSide*         = distinct int32
 
 const
-  # GPU_TEXCOLOR
+  # GPU_TEXCOLOR — enums.h:65-79
   GPU_RGBA8*    = GpuTexColor(0x0)
   GPU_RGB8*     = GpuTexColor(0x1)
   GPU_RGBA5551* = GpuTexColor(0x2)
   GPU_RGB565*   = GpuTexColor(0x3)
   GPU_RGBA4*    = GpuTexColor(0x4)
 
-  # GPU_COLORBUF
+  # GPU_COLORBUF — enums.h:148-155
   GPU_RB_RGBA8*    = GpuColorBuf(0x0)
   GPU_RB_BGR8*     = GpuColorBuf(0x1)
   GPU_RB_RGBA5551* = GpuColorBuf(0x2)
   GPU_RB_RGB565*   = GpuColorBuf(0x3)
   GPU_RB_RGBA4*    = GpuColorBuf(0x4)
 
-  # GPU_DEPTHBUF
+  # GPU_DEPTHBUF — enums.h:157-163
   GPU_RB_DEPTH24*          = GpuDepthBuf(0x2)
   GPU_RB_DEPTH24_STENCIL8* = GpuDepthBuf(0x3)
 
-  # GPU_Primitive_t
+  # GPU_Primitive_t — enums.h:492-498
   GPU_TRIANGLES*      = GpuPrimitive(0x0000)
   GPU_TRIANGLE_STRIP* = GpuPrimitive(0x0100)
   GPU_TRIANGLE_FAN*   = GpuPrimitive(0x0200)
 
-  # GPU_TEXFACE
+  # GPU_TEXFACE — enums.h:84-91
   GPU_TEXFACE_2D* = GpuTexFace(0)
 
-  # GPU_FORMATS
-  GPU_BYTE_FORMAT*     = GpuFormats(0)
-  GPU_UNSIGNED_BYTE*   = GpuFormats(1)
-  GPU_SHORT_FORMAT*    = GpuFormats(2)
-  GPU_FLOAT_FORMAT*    = GpuFormats(4)
+  # GPU_FORMATS — enums.h:293-300
+  # Suffixed _FORMAT to avoid clashing with GPU_BYTE/SHORT/FLOAT which are
+  # common names in other contexts. C originals: GPU_BYTE=0, GPU_UNSIGNED_BYTE=1,
+  # GPU_SHORT=2, GPU_FLOAT=3.
+  GPU_BYTE_FORMAT*     = GpuFormats(0)  ## C: GPU_BYTE
+  GPU_UNSIGNED_BYTE*   = GpuFormats(1)  ## C: GPU_UNSIGNED_BYTE (exact match)
+  GPU_SHORT_FORMAT*    = GpuFormats(2)  ## C: GPU_SHORT
+  GPU_FLOAT_FORMAT*    = GpuFormats(3)  ## C: GPU_FLOAT (value is 3, NOT 4)
 
-  # GPU_TEVSRC
+  # C3D_DrawElements index-type constants — base.h:8-11
+  # Pass these (NOT GPU_FORMATS values) to c3dDrawElements `typ` parameter.
+  C3D_UNSIGNED_BYTE*  = 0'i32  ## u8 index buffer  (C: C3D_UNSIGNED_BYTE)
+  C3D_UNSIGNED_SHORT* = 1'i32  ## u16 index buffer (C: C3D_UNSIGNED_SHORT)
+
+  # GPU_TEVSRC — enums.h:309-326
+  # GPU_CONSTANT renamed GPU_CONSTANT_TEV to avoid clash with blend-factor
+  # GPU_CONSTANT_COLOR. C original: GPU_CONSTANT = 0x0E.
   GPU_PRIMARY_COLOR* = GpuTevSrc(0x00)
   GPU_TEXTURE0*      = GpuTevSrc(0x03)
   GPU_TEXTURE1*      = GpuTevSrc(0x04)
   GPU_TEXTURE2*      = GpuTevSrc(0x05)
-  GPU_CONSTANT_TEV*  = GpuTevSrc(0x0E)
+  GPU_CONSTANT_TEV*  = GpuTevSrc(0x0E)  ## C: GPU_CONSTANT
   GPU_PREVIOUS*      = GpuTevSrc(0x0F)
 
-  # GPU_COMBINEFUNC
+  # GPU_COMBINEFUNC — enums.h:362-375
   GPU_REPLACE*      = GpuCombineFunc(0x00)
   GPU_MODULATE*     = GpuCombineFunc(0x01)
   GPU_ADD*          = GpuCombineFunc(0x02)
@@ -85,14 +98,16 @@ const
   GPU_INTERPOLATE*  = GpuCombineFunc(0x04)
   GPU_SUBTRACT*     = GpuCombineFunc(0x05)
 
-  # GPU_BLENDEQUATION
+  # GPU_BLENDEQUATION — enums.h:239-242
   GPU_BLEND_ADD*              = GpuBlendEquation(0)
   GPU_BLEND_SUBTRACT*         = GpuBlendEquation(1)
   GPU_BLEND_REVERSE_SUBTRACT* = GpuBlendEquation(2)
   GPU_BLEND_MIN*              = GpuBlendEquation(3)
   GPU_BLEND_MAX*              = GpuBlendEquation(4)
 
-  # GPU_BLENDFACTOR
+  # GPU_BLENDFACTOR — enums.h:245-262
+  # GPU_CONSTANT_COLOR renamed GPU_CONSTANT_COLOR_BF to avoid clash with
+  # GPU_CONSTANT_TEV. C original: GPU_CONSTANT_COLOR = 10.
   GPU_ZERO*                    = GpuBlendFactor(0)
   GPU_ONE*                     = GpuBlendFactor(1)
   GPU_SRC_COLOR*               = GpuBlendFactor(2)
@@ -103,28 +118,32 @@ const
   GPU_ONE_MINUS_SRC_ALPHA*     = GpuBlendFactor(7)
   GPU_DST_ALPHA*               = GpuBlendFactor(8)
   GPU_ONE_MINUS_DST_ALPHA*     = GpuBlendFactor(9)
-  GPU_CONSTANT_COLOR_BF*       = GpuBlendFactor(10)
+  GPU_CONSTANT_COLOR_BF*       = GpuBlendFactor(10)  ## C: GPU_CONSTANT_COLOR
   GPU_ONE_MINUS_CONSTANT_COLOR* = GpuBlendFactor(11)
   GPU_CONSTANT_ALPHA*          = GpuBlendFactor(12)
   GPU_ONE_MINUS_CONSTANT_ALPHA* = GpuBlendFactor(13)
   GPU_SRC_ALPHA_SATURATE*      = GpuBlendFactor(14)
 
-  # GPU_SHADER_TYPE
+  # GPU_SHADER_TYPE — shbin.h
   GPU_VERTEX_SHADER_TYPE*   = GpuShaderType(0)
   GPU_GEOMETRY_SHADER_TYPE* = GpuShaderType(1)
 
-  # gfxScreen_t
+  # gfxScreen_t — gfx.h (via gspgpu.h: GSP_SCREEN_TOP=0, GSP_SCREEN_BOTTOM=1)
   GFX_TOP*    = GfxScreen(0)
   GFX_BOTTOM* = GfxScreen(1)
 
-  # gfx3dSide_t
+  # gfx3dSide_t — gfx.h
   GFX_LEFT*  = Gfx3dSide(0)
   GFX_RIGHT* = Gfx3dSide(1)
 
-  # C3D_TexEnvMode bit flags (used as int params, not enum)
+  # C3D_TexEnvMode bit flags (used as int params, not a true enum)
   C3D_RGB_MODE*   = 1
   C3D_ALPHA_MODE* = 2
   C3D_BOTH_MODE*  = 3
+
+  # C3D_FrameBegin / C3D_FrameEnd flags — renderqueue.h
+  C3D_FRAME_SYNCDRAW* = 1'u8  ## Perform C3D_FrameSync before GPU status check
+  C3D_FRAME_NONBLOCK* = 2'u8  ## Return false instead of waiting if GPU busy
 
   C3D_DEFAULT_CMDBUF_SIZE* = 0x40000
 
@@ -152,15 +171,14 @@ type
   ## the parameter as int32. Pass -1 for "no depth buffer".
   ## Callers: cast GpuDepthBuf to int32, or pass -1.
 
-  ## shaderProgram_s forward declaration for C3D_BindProgram.
-  ## Full definition lives in libctru_gfx.nim; forward-declare to avoid import cycle.
-  ShaderProgram_s* {.importc: "shaderProgram_s",
-                     header: "<3ds/gpu/shaderProgram.h>".} = object
+# ShaderProgram_s imported from shader_types (single nominal type shared with
+# libctru_gfx.nim so that shaderProgramInit output flows to c3dBindProgram).
 
 # ---------------------------------------------------------------------------
 # C3D_Init / Fini
 # ---------------------------------------------------------------------------
 
+## cmdBufSize: GPU command buffer size in bytes; C3D_DEFAULT_CMDBUF_SIZE is typical.
 proc c3dInit*(cmdBufSize: int): bool
   {.importc: "C3D_Init", header: "citro3d.h".}
 
@@ -177,8 +195,11 @@ proc c3dBindProgram*(program: ptr ShaderProgram_s)
 # ---------------------------------------------------------------------------
 # Texture management
 #
-# C3D_TexInit and C3D_TexInitVRAM are static inline wrappers around
-# C3D_TexInitWithParams. All three are importable — GCC inlines the static ones.
+# Static inline functions (C3D_TexInit, C3D_TexInitVRAM, C3D_TexUpload,
+# C3D_TexEnvInit, C3D_TexEnvSrc, C3D_TexEnvFunc, C3D_TexEnvColor,
+# C3D_TexEnvOpRgb, C3D_TexEnvOpAlpha, C3D_FixedAttribSet) are resolved by the
+# C compiler from the header — they are NOT linker symbols. importc + header
+# is the correct binding strategy; GCC inlines them at the call site.
 # ---------------------------------------------------------------------------
 
 proc c3dTexInitWithParams*(tex: ptr C3D_Tex, cube: ptr C3D_TexCube,
@@ -217,7 +238,7 @@ proc c3dTexBind*(unitId: int32, tex: ptr C3D_Tex)
 # Render targets and frame management
 #
 # depthFmt: pass -1 for no depth buffer; cast GpuDepthBuf.int32 for depth.
-# See C3D_DEPTHTYPE note above — transparent union accepts int directly.
+# C3D_DEPTHTYPE transparent union accepts int directly via arm-none-eabi-gcc.
 # ---------------------------------------------------------------------------
 
 proc c3dRenderTargetCreate*(width, height: int32,
@@ -238,6 +259,7 @@ proc c3dRenderTargetSetOutput*(target: ptr C3D_RenderTarget,
                                 transferFlags: uint32)
   {.importc: "C3D_RenderTargetSetOutput", header: "citro3d.h".}
 
+## flags: C3D_FRAME_SYNCDRAW, C3D_FRAME_NONBLOCK, or 0.
 proc c3dFrameBegin*(flags: uint8): bool
   {.importc: "C3D_FrameBegin", header: "citro3d.h".}
 
@@ -251,6 +273,8 @@ proc c3dFrameEnd*(flags: uint8)
 # Draw calls
 # ---------------------------------------------------------------------------
 
+## typ: index element format — pass C3D_UNSIGNED_BYTE (0) or C3D_UNSIGNED_SHORT (1).
+## Do NOT pass GPU_FORMATS values here; they are a different enum with different semantics.
 proc c3dDrawElements*(primitive: GpuPrimitive, count: int32,
                       typ: int32, indices: pointer)
   {.importc: "C3D_DrawElements", header: "citro3d.h".}
@@ -261,8 +285,8 @@ proc c3dDrawArrays*(primitive: GpuPrimitive, first: int32, size: int32)
 # ---------------------------------------------------------------------------
 # TEV stage configuration
 #
-# C3D_TexEnvSrc and C3D_TexEnvFunc are static inline — GCC inlines them.
 # mode parameter: C3D_RGB_MODE (1), C3D_ALPHA_MODE (2), or C3D_BOTH_MODE (3).
+# All TexEnv* functions except C3D_GetTexEnv/C3D_SetTexEnv are static inline.
 # ---------------------------------------------------------------------------
 
 proc c3dGetTexEnv*(id: int32): ptr C3D_TexEnv
@@ -289,6 +313,15 @@ proc c3dTexEnvColor*(env: ptr C3D_TexEnv, color: uint32)
 
 proc c3dTexEnvBufColor*(color: uint32)
   {.importc: "C3D_TexEnvBufColor", header: "citro3d.h".}
+
+## TEV operand configuration (static inline). o1/o2/o3 take GPU_TEVOP_RGB values.
+## For the initial 2D path, the default GPU_TEVOP_RGB_SRC_COLOR operand is sufficient;
+## these are exposed for future blend-mode and multi-texturing work.
+proc c3dTexEnvOpRgb*(env: ptr C3D_TexEnv, o1, o2, o3: int32)
+  {.importc: "C3D_TexEnvOpRgb", header: "citro3d.h".}
+
+proc c3dTexEnvOpAlpha*(env: ptr C3D_TexEnv, o1, o2, o3: int32)
+  {.importc: "C3D_TexEnvOpAlpha", header: "citro3d.h".}
 
 # ---------------------------------------------------------------------------
 # Alpha blending and depth test
@@ -326,6 +359,7 @@ proc bufInfoInit*(info: ptr C3D_BufInfo)
   {.importc: "BufInfo_Init", header: "citro3d.h".}
 
 ## stride: bytes between consecutive vertex records.
+## Uses Nim int which matches ptrdiff_t on ARM32 — intentional, do not tighten to int32.
 ## permutation: u64 that maps buffer slots to vertex attributes; see BufInfo_Add docs.
 proc bufInfoAdd*(info: ptr C3D_BufInfo, data: pointer,
                  stride: int, attribCount: int32, permutation: uint64): int32
