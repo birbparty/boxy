@@ -64,10 +64,12 @@ type
       vertexArrayId: GLuint
     frameBegun: bool
     maxAtlasSize: int
-    ## Rendering backend. nil on desktop until wired via setBackend (future
-    ## adoption task). Callers MUST NOT dispatch methods on this field while
-    ## it is nil — nil ref dispatch segfaults; {.base.} BackendError does not
-    ## protect against a nil receiver.
+    ## Rendering backend. On desktop (non-ds3) assigned in newBoxy via
+    ## newOpenGLBackend — non-nil for the lifetime of the Boxy instance.
+    ## On ds3 the citro3d backend is not yet wired (future adoption task);
+    ## on that path callers MUST NOT dispatch methods while it is nil —
+    ## nil ref dispatch segfaults; {.base.} BackendError does not protect
+    ## against a nil receiver.
     backend*: Backend
 
     # Buffer data for OpenGL
@@ -323,6 +325,9 @@ proc newBoxy*(
 
   result.activeShader = result.atlasShader
 
+  # Only restoreState is currently routed through the backend (see exitRawOpenGLMode).
+  # The backend's atlas/layer/composite methods and its shaders/VAO are staged
+  # for a later adoption task and are not yet on any live draw path.
   result.backend = newOpenGLBackend(emscripten = defined(emscripten))
 
   glGenVertexArrays(1, result.vertexArrayId.addr)
@@ -368,6 +373,8 @@ else:
 
   proc exitRawOpenGLMode*(boxy: Boxy) =
     ## Exits raw OpenGL mode, restoring boxy's GL state via the backend.
+    ## The snapshot is derived from live Boxy state at restore time (not
+    ## captured at enterRawOpenGLMode) — raw GL code must not mutate layerNum.
     let snap = BackendStateSnapshot(
       vertexArrayId: boxy.vertexArrayId.int,
       indexBufferId: boxy.indices.buffer.bufferId.int,
