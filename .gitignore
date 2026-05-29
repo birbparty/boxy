@@ -13,6 +13,7 @@ nimcache
 *.pdb
 *.ilk
 .*
+!.ralph
 *.dylib
 *.dll
 *.out
