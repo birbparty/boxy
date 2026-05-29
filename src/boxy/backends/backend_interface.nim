@@ -31,12 +31,9 @@ type
 # Ordinal values are sequential (no GL constant inlining).
 # Each backend maps these to its own platform constants at bind time.
 #
-# Migration note: these enums share names and member identifiers with the
-# GL-coupled Filter/Wrap in textures.nim. They are distinct types — a value
-# of type textures.Filter cannot be passed where backend_interface.Filter is
-# expected without a conversion. When boxy.nim adopts this interface, remove
-# Filter/Wrap from textures.nim and route all uses through this module to
-# eliminate the duplication. Track as a migration step in the adoption task.
+# textures.nim imports and re-exports these enums so callers that import
+# textures get Filter/Wrap from this module transitively. They are now a
+# single shared type — boxy-lct (iteration 6) completed the migration.
 # ---------------------------------------------------------------------------
 
 type

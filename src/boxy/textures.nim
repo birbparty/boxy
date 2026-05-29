@@ -25,17 +25,22 @@ type
 # ---------------------------------------------------------------------------
 
 func toGLenum*(f: Filter): GLenum {.inline.} =
+  ## Map Filter to a GL constant for glTexParameteri.
+  ## filterDefault is a sentinel meaning "do not set" — call sites guard
+  ## with `!= filterDefault` before calling this. The arm returns GL_NEAREST
+  ## as a conservative fallback; it should never be reached.
   case f:
-  of filterDefault: GL_NEAREST.GLenum
-  of filterNearest: GL_NEAREST.GLenum
-  of filterLinear:  GL_LINEAR.GLenum
+  of filterDefault, filterNearest: GL_NEAREST.GLenum
+  of filterLinear:                 GL_LINEAR.GLenum
 
 func toGLenum*(w: Wrap): GLenum {.inline.} =
+  ## Map Wrap to a GL constant for glTexParameteri.
+  ## wDefault is a sentinel meaning "do not set" — call sites guard
+  ## with `!= wDefault` before calling this. GL_REPEAT is the GL default.
   case w:
-  of wDefault:        GL_REPEAT.GLenum
-  of wRepeat:         GL_REPEAT.GLenum
-  of wClampToEdge:    GL_CLAMP_TO_EDGE.GLenum
-  of wMirroredRepeat: GL_MIRRORED_REPEAT.GLenum
+  of wDefault, wRepeat:   GL_REPEAT.GLenum
+  of wClampToEdge:        GL_CLAMP_TO_EDGE.GLenum
+  of wMirroredRepeat:     GL_MIRRORED_REPEAT.GLenum
 
 proc bindTextureBufferData*(texture: Texture, buffer: Buffer, data: pointer) =
   ## Binds data to a texture buffer.
