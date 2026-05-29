@@ -105,6 +105,7 @@ proc swizzleTileIntoAtlas*(
 when defined(ds3):
   import pixie, vmath             # Image, BlendMode, Color (pixie re-exports chroma), IVec2
   import ../bindings/citro3d
+  import ../bindings/libctru_gfx
   export citro3d
 
   # ---------------------------------------------------------------------------
@@ -128,6 +129,16 @@ when defined(ds3):
 
   const maxTexSlots = 16
 
+  # Vertex layout for the atlas blit quad, matching render2d.v.pica register assignment:
+  #   v0 = position (x, y) as GPU_FLOAT × 2
+  #   v1 = UV (u, v) as GPU_FLOAT × 2
+  #   v2 = color (r, g, b, a) as GPU_UNSIGNED_BYTE × 4 — shader normalises by ×1/255
+  # {.packed.} ensures no compiler padding between the 4-byte and 1-byte fields.
+  type BlitVtx {.packed.} = object
+    x, y: float32
+    u, v: float32
+    r, g, b, a: uint8
+
   type
     TexSlot = object
       tex: C3D_Tex
@@ -137,12 +148,20 @@ when defined(ds3):
 
     Citro3dBackend* = ref object of Backend
       ## Nintendo 3DS citro3d rendering backend.
-      ## Atlas texture management implemented; quad batching / TEV in follow-on tasks.
+      ## Atlas texture management and GPU atlas blit implemented.
+      ## Quad batching / TEV / compositing: follow-on tasks.
       ##
       ## Handle lifetime: handles are not validated against slot reuse. Never retain
       ## a TextureHandle past the matching deleteTexture call — a freed-then-reallocated
       ## slot will have the same id (ABA hazard).
       texSlots: array[maxTexSlots, TexSlot]
+      ## Blit shader state (lazy-initialised on first blitAtlasToNewAtlas call).
+      dvlb: ptr DVLB_s
+      shaderProg: ShaderProgram_s
+      projReg: int8          ## uniform register index for "projection" in render2d.shbin
+      blitVtxBuf: pointer    ## linearAlloc; 4 × sizeof(BlitVtx) = 80 bytes
+      blitIdxBuf: pointer    ## linearAlloc; 6 × uint8 = 6 bytes
+      shaderReady: bool
 
   proc newCitro3dBackend*(): Citro3dBackend =
     Citro3dBackend()
@@ -219,12 +238,9 @@ when defined(ds3):
     ## it. GSPGPU_FlushDataCache is called before the upload to flush the ARM11
     ## write-back cache; without this the DMA reads stale physical RAM.
     ##
-    ## WARNING (boxy-z5d): this uploads the ENTIRE mirror on every call.
-    ## Once blitAtlasToNewAtlas writes the VRAM atlas directly via GPU blit, the
-    ## mirror is stale — a subsequent whole-mirror DMA would OVERWRITE the blit
-    ## result. boxy-z5d MUST switch to a partial (sub-rect) upload or re-sync
-    ## the mirror from VRAM after the blit. This is a correctness requirement,
-    ## not an optimisation.
+    ## Whole-mirror DMA on every call: blitAtlasToNewAtlas (boxy-z5d) keeps the
+    ## new atlas CPU mirror in sync with the GPU blit result via a block-copy, so
+    ## this DMA correctly includes old content plus the newly added tile.
     if level != 0: return
     if image.width == 0 or image.height == 0: return
     let i = b.slotIndex(handle)
@@ -242,28 +258,224 @@ when defined(ds3):
     c3dTexUpload(addr b.texSlots[i].tex, b.texSlots[i].mirror)
 
   # ---------------------------------------------------------------------------
+  # initBlitShader — lazy one-time setup for blitAtlasToNewAtlas
+  # ---------------------------------------------------------------------------
+
+  proc initBlitShader(b: Citro3dBackend) =
+    ## Load render2d.shbin at compile time, parse it, initialise the shader
+    ## program, and allocate the blit quad vertex/index buffers in linearAlloc.
+    ## Called once on the first blitAtlasToNewAtlas invocation.
+    const shbinBytes = staticRead("../../../build/render2d.shbin")
+    b.dvlb = dvlbParseFile(
+      cast[ptr uint32](unsafeAddr shbinBytes[0]),
+      uint32(shbinBytes.len))
+    if b.dvlb == nil:
+      raise newException(BackendError,
+        "initBlitShader: DVLB_ParseFile failed — is render2d.shbin valid?")
+    if shaderProgramInit(addr b.shaderProg) != 0:
+      raise newException(BackendError, "initBlitShader: shaderProgramInit failed")
+    if shaderProgramSetVsh(addr b.shaderProg, b.dvlb.DVLE) != 0:
+      raise newException(BackendError, "initBlitShader: shaderProgramSetVsh failed")
+    b.projReg = dvleGetUniformRegister(b.dvlb.DVLE, "projection")
+    if b.projReg < 0:
+      raise newException(BackendError,
+        "initBlitShader: 'projection' uniform not found in render2d.shbin")
+
+    # Blit quad vertex buffer: 4 vertices in clip space, full-UV coverage.
+    # shbinBytes is a const (staticRead → read-only binary data); it stays live for the
+    # process lifetime so the DVLB_s can safely reference it. If the shbin source is
+    # ever moved to a non-const heap buffer, ensure it outlives the DVLB_s.
+    b.blitVtxBuf = linearAlloc(csize_t(4 * sizeof(BlitVtx)))
+    if b.blitVtxBuf == nil:
+      raise newException(BackendError,
+        "initBlitShader: linearAlloc failed for blit vertex buffer")
+    b.blitIdxBuf = linearAlloc(csize_t(6))
+    if b.blitIdxBuf == nil:
+      linearFree(b.blitVtxBuf)
+      b.blitVtxBuf = nil
+      raise newException(BackendError,
+        "initBlitShader: linearAlloc failed for blit index buffer")
+
+    # Quad covering the bottom-left quadrant of the new atlas render target:
+    #   clip(-1,-1)→(0,0), sampling old atlas UV (0,0)→(1,1).
+    #
+    # Orientation assumption: PICA200 RTT V=0 = clip Y=-1 (same as OpenGL;
+    # V=0 = first block row written by swizzleTileIntoAtlas = image Y=0).
+    # If grow() output is vertically mirrored on device, swap the v values below (0↔1).
+    #
+    # CRITICAL COUPLING: the CPU mirror block-copy (above) places old content in block
+    # rows 0..oldStride-1 of the new mirror. The first post-grow uploadTile DMAs the
+    # ENTIRE new mirror to VRAM, overwriting the GPU blit. Both paths must agree on
+    # where old content lands or content will visibly jump on the first tile upload.
+    # On-device acceptance test: content must NOT move when the first tile is added
+    # after a grow. A static blit-looks-right test alone is insufficient.
+    let vtx = cast[ptr UncheckedArray[BlitVtx]](b.blitVtxBuf)
+    vtx[0] = BlitVtx(x: -1f, y: -1f, u: 0f, v: 0f, r: 255, g: 255, b: 255, a: 255)
+    vtx[1] = BlitVtx(x:  0f, y: -1f, u: 1f, v: 0f, r: 255, g: 255, b: 255, a: 255)
+    vtx[2] = BlitVtx(x: -1f, y:  0f, u: 0f, v: 1f, r: 255, g: 255, b: 255, a: 255)
+    vtx[3] = BlitVtx(x:  0f, y:  0f, u: 1f, v: 1f, r: 255, g: 255, b: 255, a: 255)
+
+    # Two CCW triangles: (BL,BR,TL) then (BR,TR,TL).
+    let idx = cast[ptr UncheckedArray[uint8]](b.blitIdxBuf)
+    idx[0] = 0; idx[1] = 1; idx[2] = 2
+    idx[3] = 1; idx[4] = 3; idx[5] = 2
+
+    # Flush ARM11 caches so the GX DMA sees the just-written buffer contents.
+    discard gspgpuFlushDataCache(b.blitVtxBuf, csize_t(4 * sizeof(BlitVtx)))
+    discard gspgpuFlushDataCache(b.blitIdxBuf, csize_t(6))
+    b.shaderReady = true
+
+  # ---------------------------------------------------------------------------
+  # blitAtlasToNewAtlas
+  # ---------------------------------------------------------------------------
+
+  method blitAtlasToNewAtlas*(b: Citro3dBackend, old, `new`: TextureHandle) =
+    ## Copy old atlas content into the new (2×) atlas via two complementary paths:
+    ##
+    ## 1. CPU mirror block-copy: remaps old atlas CPU mirror into new mirror layout.
+    ##    Both mirrors are Morton-encoded but with different block strides, so each
+    ##    8×8 block is copied individually to its correct offset in the new mirror.
+    ##    This ensures future uploadTile DMA calls include the blitted content.
+    ##
+    ## 2. GPU blit: draws old atlas VRAM → new atlas VRAM via C3D_DrawElements.
+    ##    Required so the new atlas VRAM is valid immediately after grow(), before
+    ##    the first uploadTile (which DMAes the mirror and would overwrite a stale
+    ##    VRAM if the mirror weren't also copied in step 1).
+    ##
+    ## Caller is responsible for save/restore of proj, activeShader, and the active
+    ## render target per the Backend interface contract.
+    let oldI = b.slotIndex(old)
+    let newI = b.slotIndex(`new`)
+    if oldI < 0 or newI < 0:
+      raise newException(BackendError, "blitAtlasToNewAtlas: invalid texture handle")
+    let oldSide = b.texSlots[oldI].sideLen
+    let newSide = b.texSlots[newI].sideLen
+
+    # -------------------------------------------------------------------------
+    # 1. CPU mirror block-copy.
+    #
+    # Block stride (columns per row) = atlasWidth / 8. Copy each 8×8 block
+    # (64 × uint32 = 256 bytes) from old stride to new stride. The pixel
+    # coordinate mapping is preserved: block (bx, by) in old atlas → same
+    # (bx, by) in new atlas.
+    # -------------------------------------------------------------------------
+    let oldStride = oldSide div 8
+    let newStride = newSide div 8
+    let oldMirror = cast[int](b.texSlots[oldI].mirror)
+    let newMirror = cast[int](b.texSlots[newI].mirror)
+    for by in 0 ..< oldStride:
+      for bx in 0 ..< oldStride:
+        let oldOff = (by * oldStride + bx) * 64 * 4
+        let newOff = (by * newStride + bx) * 64 * 4
+        copyMem(cast[pointer](newMirror + newOff),
+                cast[pointer](oldMirror + oldOff),
+                64 * 4)
+
+    # -------------------------------------------------------------------------
+    # 2. GPU blit.
+    # -------------------------------------------------------------------------
+    if not b.shaderReady:
+      b.initBlitShader()
+
+    # Temporary render target backed by the new atlas VRAM texture.
+    # depthFmt = -1 (no depth buffer).
+    let rt = c3dRenderTargetCreateFromTex(
+      addr b.texSlots[newI].tex, GPU_TEXFACE_2D, 0, -1)
+    if rt == nil:
+      raise newException(BackendError,
+        "blitAtlasToNewAtlas: C3D_RenderTargetCreateFromTex failed")
+
+    # Open a self-contained mini-frame for the offscreen blit. This matches the
+    # GL path (synchronous glBlitFramebuffer) and ensures:
+    #   1. c3dDrawElements actually submits to the GPU.
+    #   2. c3dFrameEnd(0) flushes all commands before c3dRenderTargetDelete frees the RT.
+    # PRECONDITION: must NOT be called while a frame is already open.
+    if not c3dFrameBegin(C3D_FRAME_SYNCDRAW):
+      c3dRenderTargetDelete(rt)
+      raise newException(BackendError,
+        "blitAtlasToNewAtlas: C3D_FrameBegin failed (already inside a frame?)")
+    if not c3dFrameDrawOn(rt):
+      c3dFrameEnd(0)
+      c3dRenderTargetDelete(rt)
+      raise newException(BackendError,
+        "blitAtlasToNewAtlas: C3D_FrameDrawOn failed")
+
+    # Clear all four quadrants of the new atlas to transparent black, matching the
+    # GL path (glClearColor(0,0,0,0) + glClear at boxy.nim:459-460). Ensures the
+    # three uncopied quadrants are not undefined VRAM between grow() and the first
+    # uploadTile. clearBits=1 = color only; clearColor=0x00000000 = transparent black.
+    c3dRenderTargetClear(rt, 1, 0x00000000'u32, 0)
+
+    c3dDepthTest(false, 0, 0)
+
+    # No blending — copy source pixels verbatim.
+    c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                  GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO)
+
+    # TEV stage 0: REPLACE with TEXTURE0 (pass-through for both RGB and alpha).
+    let env = c3dGetTexEnv(0)
+    c3dTexEnvInit(env)
+    c3dTexEnvSrc(env, C3D_BOTH_MODE, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0)
+    c3dTexEnvFunc(env, C3D_BOTH_MODE, GPU_REPLACE)
+    c3dDirtyTexEnv(env)
+
+    # Bind old atlas VRAM texture as the sample source.
+    c3dTexBind(0, addr b.texSlots[oldI].tex)
+
+    # Bind blit shader; upload identity projection (vertices are pre-computed in
+    # clip space, so no coordinate transform is needed).
+    c3dBindProgram(addr b.shaderProg)
+    var identMat = [
+      1f, 0f, 0f, 0f,
+      0f, 1f, 0f, 0f,
+      0f, 0f, 1f, 0f,
+      0f, 0f, 0f, 1f]
+    c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                     cast[ptr C3D_Mtx](addr identMat[0]))
+
+    # Attribute layout matching render2d.v.pica (v0=pos, v1=uv, v2=color).
+    var attrInfo: C3D_AttrInfo
+    attrInfoInit(addr attrInfo)
+    discard attrInfoAddLoader(addr attrInfo, 0, GPU_FLOAT_FORMAT, 2)
+    discard attrInfoAddLoader(addr attrInfo, 1, GPU_FLOAT_FORMAT, 2)
+    discard attrInfoAddLoader(addr attrInfo, 2, GPU_UNSIGNED_BYTE, 4)
+    c3dSetAttrInfo(addr attrInfo)
+
+    # Vertex buffer binding. stride = 20 bytes (sizeof BlitVtx).
+    # Permutation 0x210: buffer position i → AttrInfo loader i (sequential).
+    var bufInfo: C3D_BufInfo
+    bufInfoInit(addr bufInfo)
+    discard bufInfoAdd(addr bufInfo, b.blitVtxBuf, sizeof(BlitVtx), 3, 0x210'u64)
+    c3dSetBufInfo(addr bufInfo)
+
+    # Draw two triangles (6 u8 indices) forming the blit quad.
+    c3dDrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_BYTE, b.blitIdxBuf)
+
+    # End the mini-frame, flushing all GPU commands, then free the temporary RT.
+    # c3dFrameEnd must precede c3dRenderTargetDelete so the GPU drains before the
+    # RT's metadata is freed.
+    c3dFrameEnd(0)
+    c3dRenderTargetDelete(rt)
+
+  # ---------------------------------------------------------------------------
   # Stubs for follow-on tasks
   # ---------------------------------------------------------------------------
 
   method createLayerTarget*(b: Citro3dBackend,
       width, height: int32): tuple[tex: TextureHandle, rt: RenderTargetHandle] =
-    raise newException(BackendError, "createLayerTarget: not yet implemented (boxy-z5d)")
+    raise newException(BackendError, "createLayerTarget: not yet implemented (boxy-q2a)")
 
   method bindTarget*(b: Citro3dBackend, dst: RenderTargetHandle) =
-    raise newException(BackendError, "bindTarget: not yet implemented (boxy-z5d)")
+    raise newException(BackendError, "bindTarget: not yet implemented (boxy-q2a)")
 
   method flush*(b: Citro3dBackend) =
-    raise newException(BackendError, "flush: not yet implemented (boxy-z5d)")
+    raise newException(BackendError, "flush: not yet implemented (boxy-q2a)")
 
   method beginAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
-    raise newException(BackendError, "beginAtlasTarget: not yet implemented (boxy-z5d)")
+    raise newException(BackendError, "beginAtlasTarget: not yet implemented (boxy-q2a)")
 
   method endAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
-    raise newException(BackendError, "endAtlasTarget: not yet implemented (boxy-z5d)")
-
-  method blitAtlasToNewAtlas*(b: Citro3dBackend,
-      old, `new`: TextureHandle) =
-    raise newException(BackendError, "blitAtlasToNewAtlas: not yet implemented (boxy-z5d)")
+    raise newException(BackendError, "endAtlasTarget: not yet implemented (boxy-q2a)")
 
   method compositeLayer*(b: Citro3dBackend,
       src: TextureHandle,
