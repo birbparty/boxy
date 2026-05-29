@@ -2,10 +2,13 @@
 # Nintendo 3DS build pipeline for boxy examples
 #
 # Pipeline stages:
-#   1. nim compile --define:ds3 (nim_3ds.cfg copied → nim.cfg) →  build/<name>.elf
-#   2. picasso shaders/render2d.v.pica                         →  build/render2d.shbin  (if present)
+#   1. picasso shaders/render2d.v.pica                         →  build/render2d.shbin  (if present)
+#   2. nim compile --define:ds3 (nim_3ds.cfg copied → nim.cfg) →  build/<name>.elf
 #   3. smdhtool / bannertool                                   →  build/<name>.smdh     (if icons present)
 #   4. 3dsxtool                                                →  build/<name>.3dsx
+#
+# NOTE: Shader (stage 1) precedes Nim compile (stage 2) so that staticRead("../build/render2d.shbin")
+# in example files resolves correctly at compile time.
 #
 # Usage:
 #   scripts/build_3ds.sh <target.nim> [<output-name>]
@@ -83,14 +86,7 @@ cp nim_3ds.cfg nim.cfg
 
 trap 'rm -f libdl.a nim.cfg' EXIT
 
-# --- stage 1: compile Nim → ELF ---
-echo "Compiling $TARGET for Nintendo 3DS..."
-nim compile \
-  --define:ds3 \
-  -o:"$BUILD_DIR/$APP_NAME.elf" \
-  "$TARGET"
-
-# --- stage 2: PICA200 vertex shader (optional) ---
+# --- stage 1: PICA200 vertex shader (must precede Nim compile so staticRead finds the .shbin) ---
 if [[ -f "shaders/render2d.v.pica" ]]; then
   if command -v picasso &>/dev/null; then
     echo "Compiling PICA200 vertex shader..."
@@ -100,6 +96,13 @@ if [[ -f "shaders/render2d.v.pica" ]]; then
     echo "  Install via: dkp-pacman -S 3ds-dev" >&2
   fi
 fi
+
+# --- stage 2: compile Nim → ELF ---
+echo "Compiling $TARGET for Nintendo 3DS..."
+nim compile \
+  --define:ds3 \
+  -o:"$BUILD_DIR/$APP_NAME.elf" \
+  "$TARGET"
 
 # --- stage 3: SMDH metadata (optional, requires icon assets) ---
 # NOTE: bannertool and smdhtool arg order validated against bannertool 1.1.1 and
