@@ -6,6 +6,7 @@ import
 
 when not defined(ds3):
   import shady, opengl, pixie
+  import boxy/backends/opengl_backend
   export atlasVert, atlasMain, maskMain
   export pixie
 # NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
@@ -322,6 +323,8 @@ proc newBoxy*(
 
   result.activeShader = result.atlasShader
 
+  result.backend = newOpenGLBackend(emscripten = defined(emscripten))
+
   glGenVertexArrays(1, result.vertexArrayId.addr)
   glBindVertexArray(result.vertexArrayId)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result.indices.buffer.bufferId)
@@ -364,21 +367,16 @@ else:
     boxy.flush()
 
   proc exitRawOpenGLMode*(boxy: Boxy) =
-    ## Exits raw OpenGL mode, and restores boxy's state.
-    glBindVertexArray(boxy.vertexArrayId)
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boxy.indices.buffer.bufferId)
+    ## Exits raw OpenGL mode, restoring boxy's GL state via the backend.
+    let snap = BackendStateSnapshot(
+      vertexArrayId: boxy.vertexArrayId.int,
+      indexBufferId: boxy.indices.buffer.bufferId.int,
+      framebufferId: if boxy.layerNum >= 0: boxy.layerFramebuffers[boxy.layerNum].int else: 0
+    )
+    boxy.backend.restoreState(snap)
     boxy.activeShader.bindAttrib("vertexPos", boxy.positions.buffer)
     boxy.activeShader.bindAttrib("vertexColor", boxy.colors.buffer)
     boxy.activeShader.bindAttrib("vertexUv", boxy.uvs.buffer)
-    glBindFramebuffer(
-      GL_FRAMEBUFFER,
-      if boxy.layerNum >= 0:
-        boxy.layerFramebuffers[boxy.layerNum]
-      else:
-        0
-    )
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
 # Forward declaration
 proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color)
