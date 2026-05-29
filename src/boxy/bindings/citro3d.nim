@@ -255,6 +255,13 @@ proc c3dRenderTargetCreateFromTex*(tex: ptr C3D_Tex, face: GpuTexFace,
 proc c3dRenderTargetDelete*(target: ptr C3D_RenderTarget)
   {.importc: "C3D_RenderTargetDelete", header: "citro3d.h".}
 
+## clearBits: 1 = color only, 2 = depth only, 3 = both. clearColor is RGBA8 packed.
+## Must be called inside a frame (between C3D_FrameBegin and C3D_FrameEnd).
+proc c3dRenderTargetClear*(target: ptr C3D_RenderTarget,
+                            clearBits: int32, clearColor: uint32,
+                            clearDepth: uint32)
+  {.importc: "C3D_RenderTargetClear", header: "citro3d.h".}
+
 proc c3dRenderTargetSetOutput*(target: ptr C3D_RenderTarget,
                                 screen: GfxScreen, side: Gfx3dSide,
                                 transferFlags: uint32)

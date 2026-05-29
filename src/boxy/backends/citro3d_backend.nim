@@ -272,24 +272,43 @@ when defined(ds3):
     if b.dvlb == nil:
       raise newException(BackendError,
         "initBlitShader: DVLB_ParseFile failed — is render2d.shbin valid?")
-    discard shaderProgramInit(addr b.shaderProg)
-    discard shaderProgramSetVsh(addr b.shaderProg, b.dvlb.DVLE)
+    if shaderProgramInit(addr b.shaderProg) != 0:
+      raise newException(BackendError, "initBlitShader: shaderProgramInit failed")
+    if shaderProgramSetVsh(addr b.shaderProg, b.dvlb.DVLE) != 0:
+      raise newException(BackendError, "initBlitShader: shaderProgramSetVsh failed")
     b.projReg = dvleGetUniformRegister(b.dvlb.DVLE, "projection")
+    if b.projReg < 0:
+      raise newException(BackendError,
+        "initBlitShader: 'projection' uniform not found in render2d.shbin")
 
     # Blit quad vertex buffer: 4 vertices in clip space, full-UV coverage.
+    # shbinBytes is a const (staticRead → read-only binary data); it stays live for the
+    # process lifetime so the DVLB_s can safely reference it. If the shbin source is
+    # ever moved to a non-const heap buffer, ensure it outlives the DVLB_s.
     b.blitVtxBuf = linearAlloc(csize_t(4 * sizeof(BlitVtx)))
-    b.blitIdxBuf = linearAlloc(csize_t(6))
-    if b.blitVtxBuf == nil or b.blitIdxBuf == nil:
+    if b.blitVtxBuf == nil:
       raise newException(BackendError,
-        "initBlitShader: linearAlloc failed for blit vertex/index buffers")
+        "initBlitShader: linearAlloc failed for blit vertex buffer")
+    b.blitIdxBuf = linearAlloc(csize_t(6))
+    if b.blitIdxBuf == nil:
+      linearFree(b.blitVtxBuf)
+      b.blitVtxBuf = nil
+      raise newException(BackendError,
+        "initBlitShader: linearAlloc failed for blit index buffer")
 
     # Quad covering the bottom-left quadrant of the new atlas render target:
     #   clip(-1,-1)→(0,0), sampling old atlas UV (0,0)→(1,1).
     #
     # Orientation assumption: PICA200 RTT V=0 = clip Y=-1 (same as OpenGL;
     # V=0 = first block row written by swizzleTileIntoAtlas = image Y=0).
-    # If grow() output is vertically mirrored on device, swap the v values
-    # below (0↔1) and re-verify.
+    # If grow() output is vertically mirrored on device, swap the v values below (0↔1).
+    #
+    # CRITICAL COUPLING: the CPU mirror block-copy (above) places old content in block
+    # rows 0..oldStride-1 of the new mirror. The first post-grow uploadTile DMAs the
+    # ENTIRE new mirror to VRAM, overwriting the GPU blit. Both paths must agree on
+    # where old content lands or content will visibly jump on the first tile upload.
+    # On-device acceptance test: content must NOT move when the first tile is added
+    # after a grow. A static blit-looks-right test alone is insufficient.
     let vtx = cast[ptr UncheckedArray[BlitVtx]](b.blitVtxBuf)
     vtx[0] = BlitVtx(x: -1f, y: -1f, u: 0f, v: 0f, r: 255, g: 255, b: 255, a: 255)
     vtx[1] = BlitVtx(x:  0f, y: -1f, u: 1f, v: 0f, r: 255, g: 255, b: 255, a: 255)
@@ -365,7 +384,27 @@ when defined(ds3):
     if rt == nil:
       raise newException(BackendError,
         "blitAtlasToNewAtlas: C3D_RenderTargetCreateFromTex failed")
-    discard c3dFrameDrawOn(rt)
+
+    # Open a self-contained mini-frame for the offscreen blit. This matches the
+    # GL path (synchronous glBlitFramebuffer) and ensures:
+    #   1. c3dDrawElements actually submits to the GPU.
+    #   2. c3dFrameEnd(0) flushes all commands before c3dRenderTargetDelete frees the RT.
+    # PRECONDITION: must NOT be called while a frame is already open.
+    if not c3dFrameBegin(C3D_FRAME_SYNCDRAW):
+      c3dRenderTargetDelete(rt)
+      raise newException(BackendError,
+        "blitAtlasToNewAtlas: C3D_FrameBegin failed (already inside a frame?)")
+    if not c3dFrameDrawOn(rt):
+      c3dFrameEnd(0)
+      c3dRenderTargetDelete(rt)
+      raise newException(BackendError,
+        "blitAtlasToNewAtlas: C3D_FrameDrawOn failed")
+
+    # Clear all four quadrants of the new atlas to transparent black, matching the
+    # GL path (glClearColor(0,0,0,0) + glClear at boxy.nim:459-460). Ensures the
+    # three uncopied quadrants are not undefined VRAM between grow() and the first
+    # uploadTile. clearBits=1 = color only; clearColor=0x00000000 = transparent black.
+    c3dRenderTargetClear(rt, 1, 0x00000000'u32, 0)
 
     c3dDepthTest(false, 0, 0)
 
@@ -383,7 +422,8 @@ when defined(ds3):
     # Bind old atlas VRAM texture as the sample source.
     c3dTexBind(0, addr b.texSlots[oldI].tex)
 
-    # Bind blit shader; upload identity projection (vertices are in clip space).
+    # Bind blit shader; upload identity projection (vertices are pre-computed in
+    # clip space, so no coordinate transform is needed).
     c3dBindProgram(addr b.shaderProg)
     var identMat = [
       1f, 0f, 0f, 0f,
@@ -411,8 +451,10 @@ when defined(ds3):
     # Draw two triangles (6 u8 indices) forming the blit quad.
     c3dDrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_BYTE, b.blitIdxBuf)
 
-    # Delete temporary render target. If the GPU FIFO still references this RT's
-    # resources on hardware, a C3D_FrameFlush may be needed here before delete.
+    # End the mini-frame, flushing all GPU commands, then free the temporary RT.
+    # c3dFrameEnd must precede c3dRenderTargetDelete so the GPU drains before the
+    # RT's metadata is freed.
+    c3dFrameEnd(0)
     c3dRenderTargetDelete(rt)
 
   # ---------------------------------------------------------------------------
