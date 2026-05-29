@@ -148,7 +148,7 @@ when defined(ds3):
     r, g, b, a: uint8
 
   # Keep the original name available for the blit code.
-  template BlitVtx*(): typedesc = RenderVtx
+  type BlitVtx* = RenderVtx
 
   type
     TexSlot = object
@@ -530,13 +530,22 @@ when defined(ds3):
     ##
     ## Vertex order (matching boxy.nim's drawQuad):
     ##   index 0 = bottom-left, 1 = bottom-right, 2 = top-right, 3 = top-left.
-    ## Flushes automatically when the buffer is full.
     ##
     ## PRECONDITION: the caller must have an open C3D frame (see flush()).
+    ##
+    ## SINGLE-BATCH-PER-FRAME CONSTRAINT: the vertex buffer is a single
+    ## linearAlloc region. C3D_DrawElements in flush() only queues; the GPU
+    ## reads the buffer at FrameEnd. Resetting quadCount to 0 and refilling from
+    ## the start would overwrite the first batch's data before the GPU consumes it.
+    ## Therefore flush() MUST NOT be called more than once per frame with this
+    ## backend. Calling addQuad beyond quadLimit raises BackendError (does NOT
+    ## silently flush). A ring-buffer scheme is needed to lift this restriction.
     if not b.quadBufsReady:
       b.initQuadBufs()
-    if b.quadCount == quadLimit:
-      b.flush()
+    if b.quadCount >= quadLimit:
+      raise newException(BackendError,
+        "addQuad: vertex buffer full (quadLimit=" & $quadLimit &
+        "); flush() before adding more quads, but note single-flush-per-frame constraint")
     let vtx = cast[ptr UncheckedArray[RenderVtx]](b.quadVtxBuf)
     let base = b.quadCount * 4
     for i in 0 ..< 4:
@@ -555,9 +564,17 @@ when defined(ds3):
     ## blitAtlasToNewAtlas which opens its own self-contained mini-frame;
     ## batch draws are mid-frame operations — the caller drives the frame.
     ##
-    ## Caller is also responsible for: binding the shader, uploading the
-    ## projection uniform, configuring TEV, binding the atlas texture, and
-    ## setting blend state before calling flush().
+    ## SINGLE-FLUSH-PER-FRAME: the vertex buffer is a single linearAlloc region.
+    ## C3D_DrawElements only queues into the PICA command FIFO; the GPU reads the
+    ## linearAlloc buffer when FrameEnd flushes the FIFO. Calling flush() twice in
+    ## one frame would queue two draw commands both pointing to the same buffer, but
+    ## the second call resets quadCount=0 and overwrites the buffer — corrupting the
+    ## first draw. Flush exactly once per frame, after all addQuad calls are done.
+    ##
+    ## Caller is responsible for: binding the shader, uploading the projection
+    ## uniform, configuring TEV, binding the atlas texture, and setting blend state.
+    ## Color values are premultiplied-alpha (from asRgbx); the caller's blend func
+    ## should use GPU_ONE / GPU_ONE_MINUS_SRC_ALPHA to match.
     if b.quadCount == 0:
       return
     let vtxBytes = csize_t(b.quadCount * 4 * sizeof(RenderVtx))
