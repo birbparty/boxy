@@ -24,7 +24,7 @@ export shader_types
 # DVLB / DVLE shader binary types (from <3ds/gpu/shbin.h>)
 #
 # DVLB_s is declared with the DVLE and numDVLE fields exposed so the backend
-# can do dvlb.DVLE[0] to retrieve the vertex-shader DVLE_s entry. DVLP_s
+# pass dvlb.DVLE to retrieve the vertex-shader DVLE_s ptr. DVLP_s
 # (the program binary container) is left opaque — callers never access it.
 # ---------------------------------------------------------------------------
 
@@ -32,7 +32,7 @@ type
   DVLP_s* {.importc: "DVLP_s", header: "<3ds/gpu/shbin.h>".} = object
 
   ## DVLB shader binary. Obtain via dvlbParseFile; free with dvlbFree.
-  ## dvlb.DVLE[0] is the vertex shader entry (assuming a single-DVLE shbin).
+  ## dvlb.DVLE is ptr DVLE_s pointing at the first (vertex) shader entry.
   DVLB_s* {.importc: "DVLB_s", header: "<3ds/gpu/shbin.h>".} = object
     numDVLE* {.importc: "numDVLE".}: uint32    ## number of DVLE entries
     DVLE* {.importc: "DVLE".}: ptr DVLE_s      ## pointer to the DVLE array
@@ -83,7 +83,7 @@ proc dvleGetUniformRegister*(dvle: ptr DVLE_s, name: cstring): int8
 #   var dvlb = dvlbParseFile(shbinData, shbinSize)
 #   var prog: ShaderProgram_s
 #   discard shaderProgramInit(prog.addr)
-#   discard shaderProgramSetVsh(prog.addr, dvlb.DVLE[0])  # first DVLE entry
+#   discard shaderProgramSetVsh(prog.addr, dvlb.DVLE)  # ptr to first DVLE entry
 #   c3dBindProgram(prog.addr)   # citro3d.nim proc, same ShaderProgram_s type
 #   ...
 #   discard shaderProgramFree(prog.addr)

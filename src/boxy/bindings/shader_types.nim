@@ -14,7 +14,7 @@ when not defined(ds3):
 
 type
   ## libctru DVLE (shader entry-point within a DVLB binary).
-  ## Obtained via dvlb.DVLE[0] after parsing a .shbin with DVLB_ParseFile.
+  ## Obtained via dvlb.DVLE (a ptr DVLE_s) after parsing a .shbin with DVLB_ParseFile.
   DVLE_s* {.importc: "DVLE_s", header: "<3ds/gpu/shbin.h>".} = object
 
   ## libctru shader program. Stack-allocate in the backend, then pass by
