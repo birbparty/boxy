@@ -109,15 +109,16 @@ proc newOpenGLBackend*(emscripten = false): OpenGLBackend =
 
 proc toGLuint(id: int): GLuint {.inline.} = id.GLuint
 
-proc drawCompositingQuad(b: OpenGLBackend) =
+proc drawCompositingQuad(b: OpenGLBackend, shader: Shader) =
   ## Upload per-call vertex data and draw the compositing quad.
+  ## `shader` must be the currently active program so attribute locations match.
   bindBufferData(b.posBuffer,   b.posData[0].addr)
   bindBufferData(b.colorBuffer, b.colorData[0].addr)
   glBindVertexArray(b.vao)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, b.indexBuffer.bufferId)
-  b.atlasShader.bindAttrib("vertexPos",   b.posBuffer)
-  b.atlasShader.bindAttrib("vertexUv",    b.uvBuffer)
-  b.atlasShader.bindAttrib("vertexColor", b.colorBuffer)
+  shader.bindAttrib("vertexPos",   b.posBuffer)
+  shader.bindAttrib("vertexUv",    b.uvBuffer)
+  shader.bindAttrib("vertexColor", b.colorBuffer)
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, nil)
 
 proc setCompositingPos(b: OpenGLBackend, frameSize: IVec2) =
@@ -131,16 +132,14 @@ proc setCompositingPos(b: OpenGLBackend, frameSize: IVec2) =
   b.posData[6] = 0; b.posData[7] = 0
 
 proc setCompositingColor(b: OpenGLBackend, tint: Color) =
-  ## Fill colorData for all four vertices with `tint`.
-  let r = (tint.r * 255).uint8
-  let g = (tint.g * 255).uint8
-  let bv = (tint.b * 255).uint8
-  let a = (tint.a * 255).uint8
+  ## Fill colorData with `tint` using chroma asRgbx() to match the original
+  ## drawQuad path — alpha-premultiplied and rounded, not truncated.
+  let rgbx = tint.asRgbx()
   for i in 0 ..< 4:
-    b.colorData[i*4+0] = r
-    b.colorData[i*4+1] = g
-    b.colorData[i*4+2] = bv
-    b.colorData[i*4+3] = a
+    b.colorData[i*4+0] = rgbx.r
+    b.colorData[i*4+1] = rgbx.g
+    b.colorData[i*4+2] = rgbx.b
+    b.colorData[i*4+3] = rgbx.a
 
 proc ensureTmp(b: OpenGLBackend, w, h: int32) =
   ## Ensure the tmp texture/FBO is present and sized to (w, h).
@@ -248,6 +247,11 @@ method blitAtlasToNewAtlas*(backend: OpenGLBackend,
   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                          GL_TEXTURE_2D, `new`.id.toGLuint, 0)
 
+  # Clear the full new atlas so the three uncopied quadrants are transparent
+  # black, not undefined GPU memory (matches original grow() glClear).
+  glClearColor(0, 0, 0, 0)
+  glClear(GL_COLOR_BUFFER_BIT)
+
   let s = old.width.GLint
   glBlitFramebuffer(0, 0, s, s, 0, 0, s, s, GL_COLOR_BUFFER_BIT, GL_NEAREST.GLenum)
 
@@ -271,6 +275,8 @@ method compositeLayer*(backend: OpenGLBackend,
   if blendMode in {NormalBlend, MaskBlend, ScreenBlend}:
     glBindFramebuffer(GL_FRAMEBUFFER, dst.id.toGLuint)
 
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, src.id.toGLuint)
     case blendMode
     of NormalBlend:
       glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
@@ -278,29 +284,27 @@ method compositeLayer*(backend: OpenGLBackend,
       backend.atlasShader.setUniform("proj", proj)
       backend.atlasShader.setUniform("atlasTex", 0)
       backend.atlasShader.bindUniforms()
+      backend.drawCompositingQuad(backend.atlasShader)
     of MaskBlend:
       glBlendFunc(GL_ZERO, GL_SRC_COLOR)
       glUseProgram(backend.maskShader.programId)
       backend.maskShader.setUniform("proj", proj)
       backend.maskShader.setUniform("atlasTex", 0)
       backend.maskShader.bindUniforms()
+      backend.drawCompositingQuad(backend.maskShader)
     else: # ScreenBlend
       glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR)
       glUseProgram(backend.atlasShader.programId)
       backend.atlasShader.setUniform("proj", proj)
       backend.atlasShader.setUniform("atlasTex", 0)
       backend.atlasShader.bindUniforms()
-
-    glActiveTexture(GL_TEXTURE0)
-    glBindTexture(GL_TEXTURE_2D, src.id.toGLuint)
-    backend.drawCompositingQuad()
-
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA) # restore
+      backend.drawCompositingQuad(backend.atlasShader)
   else:
     # Shader-blend path: blend src + dstTexture → tmp, then blit tmp → dst.
     backend.ensureTmp(frameSize.x, frameSize.y)
 
     glBindFramebuffer(GL_FRAMEBUFFER, backend.tmpGLFbo)
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA) # explicit — not ambient state
     glClearColor(0, 0, 0, 0)
     glClear(GL_COLOR_BUFFER_BIT)
 
@@ -316,7 +320,7 @@ method compositeLayer*(backend: OpenGLBackend,
     backend.blendShader.setUniform("blendMode", blendMode.ord.int32)
     backend.blendShader.bindUniforms()
 
-    backend.drawCompositingQuad()
+    backend.drawCompositingQuad(backend.blendShader)
 
     # Blit result from tmp → dst so dst holds the composited content.
     glBindFramebuffer(GL_READ_FRAMEBUFFER, backend.tmpGLFbo)
@@ -326,6 +330,9 @@ method compositeLayer*(backend: OpenGLBackend,
     glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST.GLenum)
 
     glActiveTexture(GL_TEXTURE0)
+
+  # Unified post-composite reset — mirrors boxy.nim's popLayer tail.
+  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
 method restoreState*(backend: OpenGLBackend, s: BackendStateSnapshot) =
   ## Re-bind VAO, IBO, and FBO from `s`.
