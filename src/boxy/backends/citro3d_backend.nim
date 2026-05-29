@@ -138,6 +138,10 @@ when defined(ds3):
     Citro3dBackend* = ref object of Backend
       ## Nintendo 3DS citro3d rendering backend.
       ## Atlas texture management implemented; quad batching / TEV in follow-on tasks.
+      ##
+      ## Handle lifetime: handles are not validated against slot reuse. Never retain
+      ## a TextureHandle past the matching deleteTexture call — a freed-then-reallocated
+      ## slot will have the same id (ABA hazard).
       texSlots: array[maxTexSlots, TexSlot]
 
   proc newCitro3dBackend*(): Citro3dBackend =
@@ -149,6 +153,14 @@ when defined(ds3):
         return i
     raise newException(BackendError,
       "no free texture slots (maxTexSlots=" & $maxTexSlots & ")")
+
+  proc slotIndex(b: Citro3dBackend, handle: TextureHandle): int =
+    ## Validate `handle` and return its slot index, or -1 for any invalid input.
+    ## Guards against: zero id, out-of-range id, freed slot.
+    let i = handle.id - 1
+    if i < 0 or i >= maxTexSlots or not b.texSlots[i].used:
+      return -1
+    i
 
   # ---------------------------------------------------------------------------
   # createAtlasTexture
@@ -163,12 +175,15 @@ when defined(ds3):
     doAssert (size and (size - 1)) == 0 and size >= 512 and size <= maxAtlasSize,
       "atlas size must be a power-of-two in [512, " & $maxAtlasSize & "], got " & $size
     let i = b.allocTexSlot()
-    let ok = c3dTexInitVram(addr b.texSlots[i].tex, uint16(size), uint16(size), GPU_RGBA8)
-    doAssert ok, "C3D_TexInitVRAM failed for " & $size & "×" & $size
+    if not c3dTexInitVram(addr b.texSlots[i].tex, uint16(size), uint16(size), GPU_RGBA8):
+      raise newException(BackendError,
+        "C3D_TexInitVRAM failed for " & $size & "×" & $size)
     let bytes = csize_t(size * size * 4)
     b.texSlots[i].mirror = linearAlloc(bytes)
-    doAssert b.texSlots[i].mirror != nil,
-      "linearAlloc failed for atlas mirror (" & $bytes & " bytes)"
+    if b.texSlots[i].mirror == nil:
+      c3dTexDelete(addr b.texSlots[i].tex)   # roll back the VRAM allocation
+      raise newException(BackendError,
+        "linearAlloc failed for atlas mirror (" & $bytes & " bytes)")
     zeroMem(b.texSlots[i].mirror, bytes)
     b.texSlots[i].sideLen = size
     b.texSlots[i].used    = true
@@ -179,9 +194,8 @@ when defined(ds3):
   # ---------------------------------------------------------------------------
 
   method deleteTexture*(b: Citro3dBackend, handle: TextureHandle) =
-    if not handle.isAllocated: return
-    let i = handle.id - 1
-    if not b.texSlots[i].used: return
+    let i = b.slotIndex(handle)
+    if i < 0: return
     c3dTexDelete(addr b.texSlots[i].tex)
     linearFree(b.texSlots[i].mirror)
     b.texSlots[i].mirror  = nil
@@ -197,25 +211,34 @@ when defined(ds3):
     ## Swizzle `image` into the atlas CPU mirror at (x, y), then DMA the full
     ## mirror into VRAM via C3D_TexUpload.
     ##
-    ## level > 0 is a no-op — PICA200 atlas textures are single-level.
+    ## level > 0 is intentionally a no-op: PICA200 atlas textures are single-level.
+    ## Boxy's mip-walking loop calls all levels; levels above 0 carry no atlas data
+    ## on this backend and are safely discarded.
     ##
-    ## DMA note: the mirror is allocated with linearAlloc so the GX DMA engine
-    ## can access it; Nim GC-heap allocations are NOT DMA-accessible on 3DS.
+    ## DMA note: the mirror is in linearAlloc memory so the GX DMA engine can read
+    ## it. GSPGPU_FlushDataCache is called before the upload to flush the ARM11
+    ## write-back cache; without this the DMA reads stale physical RAM.
     ##
-    ## Whole-atlas upload on each call is intentional scaffolding: blitAtlasToNewAtlas
-    ## (boxy-z5d) will render directly into VRAM, making the CPU mirror write-only
-    ## between grow() calls. A partial-upload optimisation can follow once the
-    ## full atlas pipeline is in place.
+    ## WARNING (boxy-z5d): this uploads the ENTIRE mirror on every call.
+    ## Once blitAtlasToNewAtlas writes the VRAM atlas directly via GPU blit, the
+    ## mirror is stale — a subsequent whole-mirror DMA would OVERWRITE the blit
+    ## result. boxy-z5d MUST switch to a partial (sub-rect) upload or re-sync
+    ## the mirror from VRAM after the blit. This is a correctness requirement,
+    ## not an optimisation.
     if level != 0: return
-    doAssert handle.isAllocated, "uploadTile: handle not allocated"
-    let i = handle.id - 1
-    doAssert b.texSlots[i].used, "uploadTile: handle refers to freed texture"
+    if image.width == 0 or image.height == 0: return
+    let i = b.slotIndex(handle)
+    if i < 0:
+      raise newException(BackendError, "uploadTile: invalid or freed handle")
     let side = b.texSlots[i].sideLen
     swizzleTileIntoAtlas(
       cast[ptr uint8](unsafeAddr image.data[0]),
       image.width, image.height,
       cast[ptr uint8](b.texSlots[i].mirror),
       side, side div 8, x, y)
+    # Flush CPU cache so the GX DMA reads the bytes just written, not stale
+    # cache lines. Required: the ARM11 write-back cache is not snooped by GX.
+    discard gspgpuFlushDataCache(b.texSlots[i].mirror, csize_t(side * side * 4))
     c3dTexUpload(addr b.texSlots[i].tex, b.texSlots[i].mirror)
 
   # ---------------------------------------------------------------------------

@@ -84,6 +84,9 @@ cp nim_3ds.cfg nim.cfg
 # Uses arm-none-eabi-ar (GNU ar from devkitARM) — BSD ar rejects zero-member archives.
 #   libdl.a  — Nim injects -ldl for --os:linux targets
 #   librt.a  — pixie/times.nim triggers -lrt (POSIX realtime extensions)
+# WARNING: these are EMPTY stubs. Any code that calls symbols from these
+# libraries (e.g. clock_gettime from librt) will link but crash at runtime.
+# Do not add real realtime-clock or dynamic-linking dependencies to 3DS builds.
 "$DEVKITARM/bin/arm-none-eabi-ar" rcs libdl.a
 "$DEVKITARM/bin/arm-none-eabi-ar" rcs librt.a
 

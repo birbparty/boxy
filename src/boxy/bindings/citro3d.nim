@@ -403,3 +403,17 @@ proc linearAlloc*(size: csize_t): pointer
 
 proc linearFree*(mem: pointer)
   {.importc: "linearFree", header: "<3ds.h>".}
+
+# ---------------------------------------------------------------------------
+# CPU data-cache flush
+#
+# GSPGPU_FlushDataCache must be called on the source buffer before any DMA
+# that reads it (e.g. C3D_SyncTextureCopy inside C3D_TexLoadImage for VRAM
+# textures). The ARM11 write-back cache is not snooped by the GX DMA engine;
+# without a flush, freshly-written bytes may remain in cache and the DMA reads
+# stale physical RAM — intermittent garbled textures on hardware.
+# Header: <3ds/services/gspgpu.h>, included transitively by <3ds.h>.
+# ---------------------------------------------------------------------------
+
+proc gspgpuFlushDataCache*(adr: pointer, size: csize_t): cint
+  {.importc: "GSPGPU_FlushDataCache", header: "<3ds.h>".}
