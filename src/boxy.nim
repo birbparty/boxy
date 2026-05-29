@@ -6,6 +6,7 @@ import
 
 when not defined(ds3):
   import shady, opengl, pixie
+  import boxy/backends/opengl_backend
   export atlasVert, atlasMain, maskMain
   export pixie
 # NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
@@ -63,10 +64,12 @@ type
       vertexArrayId: GLuint
     frameBegun: bool
     maxAtlasSize: int
-    ## Rendering backend. nil on desktop until wired via setBackend (future
-    ## adoption task). Callers MUST NOT dispatch methods on this field while
-    ## it is nil — nil ref dispatch segfaults; {.base.} BackendError does not
-    ## protect against a nil receiver.
+    ## Rendering backend. On desktop (non-ds3) assigned in newBoxy via
+    ## newOpenGLBackend — non-nil for the lifetime of the Boxy instance.
+    ## On ds3 the citro3d backend is not yet wired (future adoption task);
+    ## on that path callers MUST NOT dispatch methods while it is nil —
+    ## nil ref dispatch segfaults; {.base.} BackendError does not protect
+    ## against a nil receiver.
     backend*: Backend
 
     # Buffer data for OpenGL
@@ -322,6 +325,11 @@ proc newBoxy*(
 
   result.activeShader = result.atlasShader
 
+  # Only restoreState is currently routed through the backend (see exitRawOpenGLMode).
+  # The backend's atlas/layer/composite methods and its shaders/VAO are staged
+  # for a later adoption task and are not yet on any live draw path.
+  result.backend = newOpenGLBackend(emscripten = defined(emscripten))
+
   glGenVertexArrays(1, result.vertexArrayId.addr)
   glBindVertexArray(result.vertexArrayId)
   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result.indices.buffer.bufferId)
@@ -364,21 +372,18 @@ else:
     boxy.flush()
 
   proc exitRawOpenGLMode*(boxy: Boxy) =
-    ## Exits raw OpenGL mode, and restores boxy's state.
-    glBindVertexArray(boxy.vertexArrayId)
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boxy.indices.buffer.bufferId)
+    ## Exits raw OpenGL mode, restoring boxy's GL state via the backend.
+    ## The snapshot is derived from live Boxy state at restore time (not
+    ## captured at enterRawOpenGLMode) — raw GL code must not mutate layerNum.
+    let snap = BackendStateSnapshot(
+      vertexArrayId: boxy.vertexArrayId.int,
+      indexBufferId: boxy.indices.buffer.bufferId.int,
+      framebufferId: if boxy.layerNum >= 0: boxy.layerFramebuffers[boxy.layerNum].int else: 0
+    )
+    boxy.backend.restoreState(snap)
     boxy.activeShader.bindAttrib("vertexPos", boxy.positions.buffer)
     boxy.activeShader.bindAttrib("vertexColor", boxy.colors.buffer)
     boxy.activeShader.bindAttrib("vertexUv", boxy.uvs.buffer)
-    glBindFramebuffer(
-      GL_FRAMEBUFFER,
-      if boxy.layerNum >= 0:
-        boxy.layerFramebuffers[boxy.layerNum]
-      else:
-        0
-    )
-    glEnable(GL_BLEND)
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
 # Forward declaration
 proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color)
