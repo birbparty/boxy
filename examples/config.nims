@@ -51,6 +51,20 @@ when defined(emscripten):
     echo "To run emscripten, use:"
     echo "emrun examples/" & projectName() & ".html"
 
+when defined(ds3):
+  --gc:arc
+  --mm:arc
+  -d:useMalloc
+  --define:nimAllocPagesViaMalloc
+  --define:noSignalHandler
+  --opt:size
+  --cpu:arm
+  --os:linux
+  --noMain:on
+  # Suppress desktop-only linking (windy, opengl) — 3DS uses citro3d, not GL.
+  --define:noOpenGL
+  --define:ds3NoWindy
+
 when not defined(debug):
   --define:noAutoGLerrorCheck
   --define:release
