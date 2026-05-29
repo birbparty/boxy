@@ -1,11 +1,17 @@
 import
   std/[algorithm, sequtils, sets, strutils, tables],
-  bitty, shady, vmath, bumpy, chroma, hashes, opengl, pixie,
+  bitty, vmath, bumpy, chroma, hashes,
+  boxy/backends/backend_interface,
   boxy/[blends, blurs, buffers, shaders, spreads, textures]
 
-export atlasVert, atlasMain, maskMain
-
-export pixie
+when not defined(ds3):
+  import shady, opengl, pixie
+  export atlasVert, atlasMain, maskMain
+  export pixie
+# NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
+# partial — proc bodies and transitive submodule imports (blends, textures,
+# shaders, buffers) still reference opengl/shady/pixie. Per-module wiring
+# is tracked in boxy-91w, boxy-25q, boxy-4rj, boxy-duv, boxy-0vh, boxy-8o9.
 
 const
   QuadLimit = 10_921 # 6 indices per quad, ensure indices stay in uint16 range
@@ -33,10 +39,12 @@ type
     blurXShader, blurYShader: Shader
     spreadXShader, spreadYShader: Shader
     atlasTexture*, tmpTexture: Texture
-    tmpFramebuffer: GLuint
+    when not defined(ds3):
+      tmpFramebuffer: GLuint
     layerNum: int                    ## Index into layer textures for writing.
     layerTextures: seq[Texture]      ## Layers array for pushing and popping.
-    layerFramebuffers: seq[GLuint]   ## Attachment targets for layer textures.
+    when not defined(ds3):
+      layerFramebuffers: seq[GLuint] ## Attachment targets for layer textures.
     atlasSize: int                   ## Size x size dimensions of the atlas.
     quadCount: int                   ## Number of quads drawn so far in this batch.
     quadsPerBatch: int               ## Max quads in a batch before issuing an OpenGL call.
@@ -51,9 +59,15 @@ type
     takenTiles: BitArray             ## Flag for if the tile is taken or not.
     proj: Mat4
     frameSize: IVec2                 ## Dimensions of the window frame.
-    vertexArrayId: GLuint
+    when not defined(ds3):
+      vertexArrayId: GLuint
     frameBegun: bool
     maxAtlasSize: int
+    ## Rendering backend. nil on desktop until wired via setBackend (future
+    ## adoption task). Callers MUST NOT dispatch methods on this field while
+    ## it is nil — nil ref dispatch segfaults; {.base.} BackendError does not
+    ## protect against a nil receiver.
+    backend*: Backend
 
     # Buffer data for OpenGL
     positions: tuple[buffer: Buffer, data: seq[float32]]
@@ -335,27 +349,36 @@ proc newBoxy*(
 
   result.addWhiteTile()
 
-proc enterRawOpenGLMode*(boxy: Boxy) =
-  ## Used to run other OpenGL code while using boxy.
-  boxy.flush()
+when defined(ds3):
+  proc enterRawOpenGLMode*(boxy: Boxy) =
+    ## Not supported on Nintendo 3DS — use citro3d APIs directly.
+    discard
 
-proc exitRawOpenGLMode*(boxy: Boxy) =
-  ## Exits raw OpenGL mode, and restores boxy's state.
+  proc exitRawOpenGLMode*(boxy: Boxy) =
+    ## No-op on Nintendo 3DS. Backend state restore will be wired in a
+    ## future adoption task via backend.restoreState(snapshot).
+    discard
+else:
+  proc enterRawOpenGLMode*(boxy: Boxy) =
+    ## Used to run other OpenGL code while using boxy.
+    boxy.flush()
 
-  glBindVertexArray(boxy.vertexArrayId)
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boxy.indices.buffer.bufferId)
-  boxy.activeShader.bindAttrib("vertexPos", boxy.positions.buffer)
-  boxy.activeShader.bindAttrib("vertexColor", boxy.colors.buffer)
-  boxy.activeShader.bindAttrib("vertexUv", boxy.uvs.buffer)
-  glBindFramebuffer(
-    GL_FRAMEBUFFER,
-    if boxy.layerNum >= 0:
-      boxy.layerFramebuffers[boxy.layerNum]
-    else:
-      0
-  )
-  glEnable(GL_BLEND)
-  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+  proc exitRawOpenGLMode*(boxy: Boxy) =
+    ## Exits raw OpenGL mode, and restores boxy's state.
+    glBindVertexArray(boxy.vertexArrayId)
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boxy.indices.buffer.bufferId)
+    boxy.activeShader.bindAttrib("vertexPos", boxy.positions.buffer)
+    boxy.activeShader.bindAttrib("vertexColor", boxy.colors.buffer)
+    boxy.activeShader.bindAttrib("vertexUv", boxy.uvs.buffer)
+    glBindFramebuffer(
+      GL_FRAMEBUFFER,
+      if boxy.layerNum >= 0:
+        boxy.layerFramebuffers[boxy.layerNum]
+      else:
+        0
+    )
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 
 # Forward declaration
 proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color)
@@ -390,7 +413,7 @@ proc grow(boxy: Boxy) =
     for image in images:
       echo "  Image ", image[0], " size: ", image[1].size.x, "x", image[1].size.y
       inc i
-    when not defined(emscripten):
+    when not defined(emscripten) and not defined(ds3):
       boxy.atlasTexture.writeFile("tmp/atlas.png")
     raise newException(
       BoxyError,
