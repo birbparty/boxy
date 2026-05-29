@@ -53,16 +53,17 @@ when defined(emscripten):
 
 when defined(ds3):
   --mm:arc                          # --mm:arc implies --gc:arc; no need to set both
-  -d:useMalloc
+  --define:useMalloc
   --define:nimAllocPagesViaMalloc
   --define:noSignalHandler
+  --threads:off                     # no pthreads on 3DS; prevents -pthread linker flag
   --opt:size
   # --cpu:arm and --os:linux are set in nim_3ds.cfg; defining them here too would
   # cause redundancy and possible drift — the cfg is the single source of truth.
-  --noMain:on                       # 3DS entry point is provided by libctru; a future
-                                    # entry-point file must call NimMain() explicitly.
-  # Forward-looking: consumed once boxy.nim/textures.nim gate `import opengl`
-  # behind `when not defined(noOpenGL)`. No effect yet — see boxy-0hw.
+  # NOTE: --noMain:on is intentionally absent. Nim generates main() which calls
+  # NimMain() then top-level code. This is correct for milestone-1 gate tests.
+  # When boxy moves to a proper citro3d game loop, add a dedicated entry-point
+  # file that calls NimMain() explicitly and remove this note.
   --define:noOpenGL
   --define:ds3NoWindy
 

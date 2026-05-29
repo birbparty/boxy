@@ -132,8 +132,11 @@ fi
 echo "Packaging .3dsx..."
 TOOL_ARGS=("$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/$APP_NAME.3dsx")
 [[ -f "$BUILD_DIR/$APP_NAME.smdh" ]] && TOOL_ARGS+=("--smdh=$BUILD_DIR/$APP_NAME.smdh")
-TOOL_ARGS+=("--romfs=$ROMFS_DIR")
+# Only pass --romfs if the directory contains at least one file; 3dsxtool
+# errors with "Cannot open SMDH file!" when given an empty romfs dir.
+if [[ -n "$(find "$ROMFS_DIR" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
+  TOOL_ARGS+=("--romfs=$ROMFS_DIR")
+fi
 3dsxtool "${TOOL_ARGS[@]}"
 
 echo "Built: $BUILD_DIR/$APP_NAME.3dsx"
-echo "NOTE: packaging only — no NimMain() entry point yet; the .3dsx will not run boxy code." >&2
