@@ -79,12 +79,18 @@ if [[ -f nim.cfg ]]; then
 fi
 cp nim_3ds.cfg nim.cfg
 
-# libdl.a stub — Nim injects -ldl for --os:linux targets; 3DS has no libdl.
-# nim_3ds.cfg passes -L. so the linker finds this stub here in the project root.
+# Stub archives for POSIX libraries Nim injects but 3DS lacks.
+# nim_3ds.cfg passes -L. so the linker finds these stubs in the project root.
 # Uses arm-none-eabi-ar (GNU ar from devkitARM) — BSD ar rejects zero-member archives.
+#   libdl.a  — Nim injects -ldl for --os:linux targets
+#   librt.a  — pixie/times.nim triggers -lrt (POSIX realtime extensions)
+# WARNING: these are EMPTY stubs. Any code that calls symbols from these
+# libraries (e.g. clock_gettime from librt) will link but crash at runtime.
+# Do not add real realtime-clock or dynamic-linking dependencies to 3DS builds.
 "$DEVKITARM/bin/arm-none-eabi-ar" rcs libdl.a
+"$DEVKITARM/bin/arm-none-eabi-ar" rcs librt.a
 
-trap 'rm -f libdl.a nim.cfg' EXIT
+trap 'rm -f libdl.a librt.a nim.cfg' EXIT
 
 # --- stage 1: PICA200 vertex shader (must precede Nim compile so staticRead finds the .shbin) ---
 if [[ -f "shaders/render2d.v.pica" ]]; then
