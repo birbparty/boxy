@@ -129,15 +129,26 @@ when defined(ds3):
 
   const maxTexSlots = 16
 
-  # Vertex layout for the atlas blit quad, matching render2d.v.pica register assignment:
+  const quadLimit* = 10_921
+    ## Maximum quads per draw batch. Matches OpenGL QuadLimit in boxy.nim.
+    ## Derivation: 4 vertices × 10921 = 43684 < 65536 (uint16 index range).
+
+  # Shared render vertex layout for all citro3d draw calls, matching
+  # render2d.v.pica register assignment:
   #   v0 = position (x, y) as GPU_FLOAT × 2
   #   v1 = UV (u, v) as GPU_FLOAT × 2
-  #   v2 = color (r, g, b, a) as GPU_UNSIGNED_BYTE × 4 — shader normalises by ×1/255
-  # {.packed.} ensures no compiler padding between the 4-byte and 1-byte fields.
-  type BlitVtx {.packed.} = object
+  #   v2 = color (r, g, b, a) as GPU_UNSIGNED_BYTE × 4
+  #
+  # PICA200 does NOT auto-normalize GPU_UNSIGNED_BYTE to [0, 1]; the shader
+  # multiplies by 1/255 explicitly. Do NOT also normalize on the CPU side —
+  # double-normalization yields near-black tints. Total: 20 bytes, no padding.
+  type RenderVtx {.packed.} = object
     x, y: float32
     u, v: float32
     r, g, b, a: uint8
+
+  # Keep the original name available for the blit code.
+  template BlitVtx*(): typedesc = RenderVtx
 
   type
     TexSlot = object
@@ -148,20 +159,26 @@ when defined(ds3):
 
     Citro3dBackend* = ref object of Backend
       ## Nintendo 3DS citro3d rendering backend.
-      ## Atlas texture management and GPU atlas blit implemented.
-      ## Quad batching / TEV / compositing: follow-on tasks.
+      ## Atlas management, GPU atlas blit, and quad batch draw pipeline implemented.
       ##
       ## Handle lifetime: handles are not validated against slot reuse. Never retain
       ## a TextureHandle past the matching deleteTexture call — a freed-then-reallocated
       ## slot will have the same id (ABA hazard).
       texSlots: array[maxTexSlots, TexSlot]
-      ## Blit shader state (lazy-initialised on first blitAtlasToNewAtlas call).
+      ## Atlas blit shader state (lazy-initialised on first blitAtlasToNewAtlas call).
       dvlb: ptr DVLB_s
       shaderProg: ShaderProgram_s
       projReg: int8          ## uniform register index for "projection" in render2d.shbin
-      blitVtxBuf: pointer    ## linearAlloc; 4 × sizeof(BlitVtx) = 80 bytes
+      blitVtxBuf: pointer    ## linearAlloc; 4 × sizeof(RenderVtx) = 80 bytes
       blitIdxBuf: pointer    ## linearAlloc; 6 × uint8 = 6 bytes
       shaderReady: bool
+      ## Quad batch pipeline (lazy-initialised on first addQuad call).
+      quadVtxBuf: pointer    ## linearAlloc; quadLimit × 4 × sizeof(RenderVtx)
+      quadIdxBuf: pointer    ## linearAlloc; quadLimit × 6 × sizeof(uint16)
+      quadAttrInfo: C3D_AttrInfo
+      quadBufInfo: C3D_BufInfo
+      quadCount: int         ## quads accumulated since last flush()
+      quadBufsReady: bool
 
   proc newCitro3dBackend*(): Citro3dBackend =
     Citro3dBackend()
@@ -458,6 +475,100 @@ when defined(ds3):
     c3dRenderTargetDelete(rt)
 
   # ---------------------------------------------------------------------------
+  # Quad batch pipeline — initQuadBufs, addQuad, flush
+  # ---------------------------------------------------------------------------
+
+  proc initQuadBufs(b: Citro3dBackend) =
+    ## Allocate and initialise the quad vertex + index buffers.
+    ## Called once on the first addQuad invocation.
+    let vtxBytes = csize_t(quadLimit * 4 * sizeof(RenderVtx))
+    let idxBytes = csize_t(quadLimit * 6 * 2)  # 6 uint16 indices per quad
+
+    b.quadVtxBuf = linearAlloc(vtxBytes)
+    if b.quadVtxBuf == nil:
+      raise newException(BackendError,
+        "initQuadBufs: linearAlloc failed for vertex buffer")
+    b.quadIdxBuf = linearAlloc(idxBytes)
+    if b.quadIdxBuf == nil:
+      linearFree(b.quadVtxBuf); b.quadVtxBuf = nil
+      raise newException(BackendError,
+        "initQuadBufs: linearAlloc failed for index buffer")
+
+    # Pre-build static index buffer. Same winding pattern as the GL path
+    # (boxy.nim:310-316): per quad i, indices [i*4+3, i*4+0, i*4+1, i*4+2, i*4+3, i*4+1].
+    # Vertex order in addQuad: 0=BL, 1=BR, 2=TR, 3=TL. Two CCW triangles:
+    #   (TL,BL,BR) and (TR,TL,BR). Both front-face under PICA200 default CCW winding.
+    let idx = cast[ptr UncheckedArray[uint16]](b.quadIdxBuf)
+    for i in 0 ..< quadLimit:
+      let base = i * 4
+      idx[i * 6 + 0] = uint16(base + 3)
+      idx[i * 6 + 1] = uint16(base + 0)
+      idx[i * 6 + 2] = uint16(base + 1)
+      idx[i * 6 + 3] = uint16(base + 2)
+      idx[i * 6 + 4] = uint16(base + 3)
+      idx[i * 6 + 5] = uint16(base + 1)
+    discard gspgpuFlushDataCache(b.quadIdxBuf, idxBytes)
+
+    # Pre-configure AttrInfo: same register layout as render2d.v.pica.
+    attrInfoInit(addr b.quadAttrInfo)
+    discard attrInfoAddLoader(addr b.quadAttrInfo, 0, GPU_FLOAT_FORMAT, 2)
+    discard attrInfoAddLoader(addr b.quadAttrInfo, 1, GPU_FLOAT_FORMAT, 2)
+    discard attrInfoAddLoader(addr b.quadAttrInfo, 2, GPU_UNSIGNED_BYTE, 4)
+
+    # Pre-configure BufInfo: single interleaved buffer, stride = 20 bytes.
+    bufInfoInit(addr b.quadBufInfo)
+    discard bufInfoAdd(addr b.quadBufInfo, b.quadVtxBuf,
+                       sizeof(RenderVtx), 3, 0x210'u64)
+
+    b.quadBufsReady = true
+
+  proc addQuad*(b: Citro3dBackend,
+      posQuad: array[4, Vec2],
+      uvQuad:  array[4, Vec2],
+      tints:   array[4, Color]) =
+    ## Accumulate one quad into the vertex buffer.
+    ##
+    ## Vertex order (matching boxy.nim's drawQuad):
+    ##   index 0 = bottom-left, 1 = bottom-right, 2 = top-right, 3 = top-left.
+    ## Flushes automatically when the buffer is full.
+    ##
+    ## PRECONDITION: the caller must have an open C3D frame (see flush()).
+    if not b.quadBufsReady:
+      b.initQuadBufs()
+    if b.quadCount == quadLimit:
+      b.flush()
+    let vtx = cast[ptr UncheckedArray[RenderVtx]](b.quadVtxBuf)
+    let base = b.quadCount * 4
+    for i in 0 ..< 4:
+      let c = tints[i].asRgbx()
+      vtx[base + i] = RenderVtx(
+        x: posQuad[i].x, y: posQuad[i].y,
+        u: uvQuad[i].x,  v: uvQuad[i].y,
+        r: c.r, g: c.g, b: c.b, a: c.a)
+    inc b.quadCount
+
+  method flush*(b: Citro3dBackend) =
+    ## Submit the current quad batch to the GPU via C3D_DrawElements.
+    ##
+    ## PRECONDITION: must be called inside an open C3D frame owned by the caller
+    ## (between C3D_FrameBegin and C3D_FrameEnd). This is the opposite of
+    ## blitAtlasToNewAtlas which opens its own self-contained mini-frame;
+    ## batch draws are mid-frame operations — the caller drives the frame.
+    ##
+    ## Caller is also responsible for: binding the shader, uploading the
+    ## projection uniform, configuring TEV, binding the atlas texture, and
+    ## setting blend state before calling flush().
+    if b.quadCount == 0:
+      return
+    let vtxBytes = csize_t(b.quadCount * 4 * sizeof(RenderVtx))
+    discard gspgpuFlushDataCache(b.quadVtxBuf, vtxBytes)
+    c3dSetAttrInfo(addr b.quadAttrInfo)
+    c3dSetBufInfo(addr b.quadBufInfo)
+    c3dDrawElements(GPU_TRIANGLES, int32(b.quadCount * 6),
+                    C3D_UNSIGNED_SHORT, b.quadIdxBuf)
+    b.quadCount = 0
+
+  # ---------------------------------------------------------------------------
   # Stubs for follow-on tasks
   # ---------------------------------------------------------------------------
 
@@ -467,9 +578,6 @@ when defined(ds3):
 
   method bindTarget*(b: Citro3dBackend, dst: RenderTargetHandle) =
     raise newException(BackendError, "bindTarget: not yet implemented (boxy-q2a)")
-
-  method flush*(b: Citro3dBackend) =
-    raise newException(BackendError, "flush: not yet implemented (boxy-q2a)")
 
   method beginAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
     raise newException(BackendError, "beginAtlasTarget: not yet implemented (boxy-q2a)")
