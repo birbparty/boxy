@@ -8,6 +8,10 @@ when not defined(ds3):
   import shady, opengl, pixie
   export atlasVert, atlasMain, maskMain
   export pixie
+# NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
+# partial — proc bodies and transitive submodule imports (blends, textures,
+# shaders, buffers) still reference opengl/shady/pixie. Per-module wiring
+# is tracked in boxy-91w, boxy-25q, boxy-4rj, boxy-duv, boxy-0vh, boxy-8o9.
 
 const
   QuadLimit = 10_921 # 6 indices per quad, ensure indices stay in uint16 range
@@ -59,7 +63,11 @@ type
       vertexArrayId: GLuint
     frameBegun: bool
     maxAtlasSize: int
-    backend*: Backend                ## Rendering backend (nil on desktop until wired)
+    ## Rendering backend. nil on desktop until wired via setBackend (future
+    ## adoption task). Callers MUST NOT dispatch methods on this field while
+    ## it is nil — nil ref dispatch segfaults; {.base.} BackendError does not
+    ## protect against a nil receiver.
+    backend*: Backend
 
     # Buffer data for OpenGL
     positions: tuple[buffer: Buffer, data: seq[float32]]
@@ -347,7 +355,8 @@ when defined(ds3):
     discard
 
   proc exitRawOpenGLMode*(boxy: Boxy) =
-    ## Not supported on Nintendo 3DS — call backend.restoreState manually.
+    ## No-op on Nintendo 3DS. Backend state restore will be wired in a
+    ## future adoption task via backend.restoreState(snapshot).
     discard
 else:
   proc enterRawOpenGLMode*(boxy: Boxy) =
