@@ -4,17 +4,20 @@
 ;   (scripts/build_3ds.sh runs this automatically when the file is present)
 ;
 ; Input register layout — must match AttrInfo_AddLoader order in citro3d_backend.nim:
-;   v0  position    vec4  (x, y, z=0, w=1) — GPU_FLOAT, 4 components
+;   v0  position    vec2  (x, y; shader forces z=0 w=1 — any component count is safe)
+;                         — GPU_FLOAT, recommend 2 components (GPU pads to (x,y,0,1))
 ;   v1  UV          vec2  (u, v; z/w padded to 0/1 by GPU) — GPU_FLOAT, 2 components
 ;   v2  color       vec4  (r, g, b, a) — GPU_UNSIGNED_BYTE, 4 components
 ;
 ; Color normalization: GPU_UNSIGNED_BYTE is NOT normalized by the PICA200.
-; The GPU loads u8 [0,255] as the raw float (e.g., 255 → 255.0).
-; We multiply by 1/255 in the shader to convert to [0,1] before output.
-; Evidence: loop_subdivision citro3d example passes valence as GPU_UNSIGNED_BYTE
-; and the geometry shader treats the value as a raw integer (6 → 6.0), not 0.024.
+; The PICA200 AttrInfo has no per-attribute normalize flag — unlike GL's
+; glVertexAttribPointer(normalized) — so integer attributes are always delivered
+; as raw floats. GPU loads u8 [0,255] as the raw float value (e.g. 255 → 255.0).
+; We multiply by 1/255 in-shader to map to [0,1]; alpha is scaled the same way.
+; WARNING: if the backend ever switches v2 to GPU_FLOAT, remove this mul —
+; colors would be divided by 255 a second time and render near-black.
 ;
-; Output semantic contract — fragment stage reads these in order:
+; Output semantic contract:
 ;   result.position   → outpos   clip-space position
 ;   result.texcoord0  → outtc0   UV for sampler2D atlas
 ;   result.color      → outclr   per-vertex tint (MODULATE with texel in TEV)
@@ -24,6 +27,9 @@
 
 ; Constants
 .constf inv255(0.00392157, 0.00392157, 0.00392157, 0.00392157) ; 1/255
+.constf myconst(0.0, 1.0, 0.0, 0.0)
+.alias  zeros myconst.xxxx
+.alias  ones  myconst.yyyy
 
 ; Inputs
 .alias inpos v0
@@ -36,20 +42,31 @@
 .out outclr color
 
 .proc main
-    ; outpos = projection * inpos
-    ; inpos is already (x, y, 0, 1) — no need to force w
-    dp4 outpos.x, projection[0], inpos
-    dp4 outpos.y, projection[1], inpos
-    dp4 outpos.z, projection[2], inpos
-    dp4 outpos.w, projection[3], inpos
+    ; Build (x, y, 0, 1) in r1 regardless of how the backend declares the
+    ; position attribute count (2- or 4-component). Forcing z/w here means the
+    ; orthographic translate column always applies correctly.
+    mov r1.xy, inpos.xy
+    mov r1.z,  zeros    ; z = 0
+    mov r1.w,  ones     ; w = 1
 
-    ; Pass UV through (v1.xy are u,v; z/w GPU-padded)
+    ; outpos = projection * (x, y, 0, 1)
+    dp4 outpos.x, projection[0], r1
+    dp4 outpos.y, projection[1], r1
+    dp4 outpos.z, projection[2], r1
+    dp4 outpos.w, projection[3], r1
+
+    ; Pass UV through; write zw to (0, 1) so no output component is undefined
     mov outtc0.xy, intc0.xy
+    mov outtc0.z,  zeros
+    mov outtc0.w,  ones
 
-    ; Normalize color from [0,255] to [0,1]
-    ; inv255 can't be used as src2 of mul directly — load into temp first
+    ; Normalize color from [0,255] to [0,1]; clamp so float rounding can't exceed 1.0
+    ; (255 * 0.00392157 ≈ 1.0000005 — below 8-bit resolution but provably in-range)
+    ; Note: constf alias cannot appear as src2 of mul in picasso 2.7.2; load into r0 first
     mov r0, inv255
-    mul outclr, inclr, r0
+    mul r1, inclr, r0
+    mov r0, ones
+    min outclr, r1, r0
 
     end
 .end
