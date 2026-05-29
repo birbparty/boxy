@@ -212,7 +212,8 @@ when not defined(ds3):
 
   proc readImage*(texture: Texture): Image =
     ## Reads the data of the texture back.
-    ## Not supported on emscripten or ds3 (no GPU readback).
+    ## Not supported on emscripten (no GPU readback). ds3 is excluded
+    ## at the module level by the when not defined(ds3): guard above.
     when defined(emscripten):
       raise newException(
         Exception,

@@ -1,7 +1,7 @@
 ## GLSL shader compilation and uniform binding. Desktop/OpenGL only — the
 ## entire module is guarded under when not defined(ds3). On 3DS, GPU
-## programs are PICA200 shbins loaded via libctru/citro3d; this module
-## is not used.
+## programs will be PICA200 shbins loaded via libctru/citro3d (not yet
+## implemented); this module is not compiled for ds3.
 
 
 when not defined(ds3):
