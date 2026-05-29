@@ -92,8 +92,10 @@ if [[ -f "shaders/render2d.v.pica" ]]; then
     echo "Compiling PICA200 vertex shader..."
     picasso shaders/render2d.v.pica -o "$BUILD_DIR/render2d.shbin"
   else
-    echo "Warning: picasso not found — skipping shader compilation." >&2
+    echo "Error: picasso not found but shaders/render2d.v.pica exists." >&2
+    echo "  The .shbin is staticRead at Nim compile time; the build will fail without it." >&2
     echo "  Install via: dkp-pacman -S 3ds-dev" >&2
+    exit 1
   fi
 fi
 
