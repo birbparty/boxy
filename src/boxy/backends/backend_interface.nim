@@ -1,301 +1,198 @@
-# backend_interface.nim — Platform-agnostic rendering backend design
-#
-# STATUS: Design stub. No implementation. See boxy-0hw for implementation task.
-#
-# This file defines the type plan and interface contract for a backend that can
-# be implemented by OpenGL (desktop/emscripten), PICA200/citro3d (3DS), or GXM
-# (PSP/Vita). All types here must compile without importing opengl.
+## Platform-agnostic rendering backend interface for boxy.
+##
+## Defines the GL-free type vocabulary (Filter, Wrap, TextureHandle,
+## RenderTargetHandle) and the abstract Backend base type that
+## opengl_backend.nim and citro3d_backend.nim implement.
+##
+## Zero opengl imports — compiles on any platform without GL headers.
+##
+## Dispatch model: runtime vtable via `ref object of RootObj` methods.
+## Platform is selected at compile time (`--define:ds3`) so only one backend
+## is ever linked, but runtime dispatch avoids scattering `when defined(ds3)`
+## through boxy.nim and keeps the call sites uniform. On 3DS the vtable is a
+## single-entry table (one concrete type), so the overhead is one pointer
+## dereference — acceptable for a resource-constrained target given the
+## reduction in `when` branches across the codebase.
+
+import pixie, vmath
 
 # ---------------------------------------------------------------------------
-# SECTION 1: GL-free type definitions
-#
-# These replace the GL-coupled enums in src/boxy/textures.nim lines 6–23.
-# The original types embed GL constants as ordinal values:
-#
-#   filterNearest = GL_NEAREST   (9728)
-#   filterLinear  = GL_LINEAR    (9729)
-#   wRepeat       = GL_REPEAT    (10497)
-#
-# This makes them unusable without importing opengl. The backend is responsible
-# for translating the abstract enum to its platform constant at bind time.
+# Error type
 # ---------------------------------------------------------------------------
 
 type
-  # Replaces textures.nim Filter (lines 6–9).
-  # Ordinal values are sequential; each backend maps these to its own constants.
-  BackendFilter* = enum
-    bfDefault,
-    bfNearest,
-    bfLinear
+  BackendError* = object of CatchableError
+    ## Raised when a Backend method is called on the abstract base or on a
+    ## backend that does not support the operation.
 
-  # Replaces textures.nim Wrap (lines 11–14).
-  BackendWrap* = enum
-    bwDefault,
-    bwRepeat,
-    bwClampToEdge,
-    bwMirroredRepeat
+# ---------------------------------------------------------------------------
+# GL-free replacements for the GL-coupled types in textures.nim
+#
+# Ordinal values are sequential (no GL constant inlining).
+# Each backend maps these to its own platform constants at bind time.
+#
+# Migration note: these enums share names and member identifiers with the
+# GL-coupled Filter/Wrap in textures.nim. They are distinct types — a value
+# of type textures.Filter cannot be passed where backend_interface.Filter is
+# expected without a conversion. When boxy.nim adopts this interface, remove
+# Filter/Wrap from textures.nim and route all uses through this module to
+# eliminate the duplication. Track as a migration step in the adoption task.
+# ---------------------------------------------------------------------------
 
-  # Opaque handle to a GPU-side texture. The backend implementation holds the
-  # concrete GL/citro3d resource; Boxy holds only this handle.
-  #
-  # Using int rather than GLuint so this file compiles without opengl.
-  # On GL: id = textureId (GLuint cast to int).
-  # On citro3d: id = index into backend's C3D_Tex array (VRAM-allocated).
+type
+  Filter* = enum
+    ## Texture filtering mode. Map to platform constants in each backend.
+    filterDefault,
+    filterNearest,
+    filterLinear
+
+  Wrap* = enum
+    ## Texture wrap mode. Map to platform constants in each backend.
+    wDefault,
+    wRepeat,
+    wClampToEdge,
+    wMirroredRepeat
+
+  ## Opaque handle to a GPU-side texture.
+  ## `id == 0` means not yet allocated — use `isAllocated()` to test.
+  ## On GL: id is a GLuint cast to int.
+  ## On citro3d: id is an index into the backend's C3D_Tex array.
+  ## The backend owns the GPU resource lifetime; Boxy holds only this handle.
   TextureHandle* = object
-    id*: int                  ## Backend-assigned handle (0 = not yet created)
+    id*: int          ## Backend-assigned handle; 0 = not yet allocated
     width*, height*: int32
     hasMipmap*: bool
-    magFilter*: BackendFilter
-    minFilter*: BackendFilter
-    mipFilter*: BackendFilter
-    wrapS*, wrapT*: BackendWrap
+    magFilter*: Filter
+    minFilter*: Filter
+    mipFilter*: Filter
+    wrapS*, wrapT*: Wrap
 
-  # Opaque framebuffer / render-target handle.
-  # On GL: id = GLuint FBO (0 = default framebuffer / screen).
-  # On citro3d: id = index into backend's C3D_RenderTarget array.
+  ## Opaque framebuffer / render-target handle.
+  ## `id == 0` means the default framebuffer (screen).
+  ## On GL: id is a GLuint FBO.
+  ## On citro3d: id is an index into the backend's C3D_RenderTarget array.
   RenderTargetHandle* = object
-    id*: int
+    id*: int          ## Backend-assigned handle; 0 = default framebuffer (screen)
+
+  ## Snapshot of the minimal VAO/IBO/framebuffer bindings Boxy saves before
+  ## enterRawOpenGLMode and restores via restoreState after exitRawOpenGLMode.
+  ##
+  ## Vertex attribute binds (posAttrib, colorAttrib, uvAttrib) are NOT in the
+  ## snapshot because they are re-established by the backend from its own
+  ## owned shader and buffers — Boxy does not hold those references.
+  BackendStateSnapshot* = object
+    vertexArrayId*: int   ## VAO id (GLuint on GL)
+    indexBufferId*: int   ## IBO id (GLuint on GL)
+    framebufferId*: int   ## FBO id; 0 = default framebuffer (screen)
+
+  ## Abstract backend. Implement per platform.
+  ## ARC safety contract: the backend holds NO reference back to Boxy.
+  ## All state Boxy knows (handles, blend mode, tint, frame size) is passed
+  ## as parameters on each call. The backend owns GPU resource lifetime.
+  Backend* = ref object of RootObj
 
 # ---------------------------------------------------------------------------
-# SECTION 2: Backend object graph — ARC cycle safety
-#
-# ARC (--mm:arc) is the chosen GC for 3DS: deterministic, smallest footprint,
-# no background cycle-collector cost. ARC has no cycle collector, so to stay
-# leak-free under ARC the Boxy<->backend object graph must be a DAG, not a
-# cycle. (ORC would also compile on ARM/embedded, but we deliberately avoid
-# its overhead and non-determinism.)
-#
-# SAFE layout:
-#   Boxy (ref) ──owns──► BackendGL (ref)   [GL implementation]
-#   Boxy (ref) ──owns──► BackendC3D (ref)  [citro3d implementation]
-#
-# UNSAFE layout (DO NOT USE):
-#   Boxy (ref) ──► Backend (ref) ──► Boxy (ref)   ← cycle, leaks under ARC
-#
-# The backend holds NO reference back to Boxy. All state that the backend
-# needs is passed in as parameters on each call. Boxy passes handles it
-# received from prior backend calls; it never passes `self`.
-#
-# Layer textures and framebuffers are owned by the backend; Boxy holds only
-# RenderTargetHandle values (integers). When Boxy calls beginFrame, the backend
-# returns a RenderTargetHandle for the screen. When pushLayer is called, Boxy
-# calls backend.allocLayerTarget() and stores the returned handle in
-# boxy.layerFramebuffers[boxy.layerNum]. dec/inc layerNum remains in Boxy.
+# Convenience constructors / predicates
 # ---------------------------------------------------------------------------
 
-# (Sketch — not a working type; shows ownership without cycles)
-#
-# type
-#   BackendBase* = ref object of RootObj   ## Implement per platform
-#
-#   Boxy* = ref object
-#     backend: BackendBase                 ## owned, no back-ref
-#     atlasTexture: TextureHandle          ## id from backend.createAtlasTexture()
-#     layerTargets: seq[RenderTargetHandle]
-#     ... (all bookkeeping fields remain here)
+func noTextureHandle*(): TextureHandle {.inline.} =
+  ## Returns the sentinel for "not yet allocated" (id == 0).
+  TextureHandle(id: 0)
+
+func defaultRenderTarget*(): RenderTargetHandle {.inline.} =
+  ## Returns the sentinel for the default framebuffer / screen (id == 0).
+  RenderTargetHandle(id: 0)
+
+func isAllocated*(h: TextureHandle): bool {.inline.} =
+  ## True when the handle refers to a live GPU texture.
+  h.id != 0
+
+func isScreen*(h: RenderTargetHandle): bool {.inline.} =
+  ## True when the handle refers to the default framebuffer (screen).
+  h.id == 0
 
 # ---------------------------------------------------------------------------
-# SECTION 3: Higher-level GPU operations
-#
-# These are the three compound operations that grow() and popLayer() need
-# from the backend. They are expressed as single backend calls so that each
-# platform can implement them efficiently (e.g. citro3d's C3D_DrawOn instead
-# of GL FBO swap).
+# Abstract interface — methods dispatch to the concrete GL / citro3d impl
 # ---------------------------------------------------------------------------
 
-# 3a. blitAtlasToNewAtlas — used by grow() (boxy.nim lines 384–496)
-#
-# Copies all content from `old` into `new`, which has twice the side length.
-# On GL: creates a temporary FBO, attaches `new`, issues a full-screen draw
-#   with the atlas shader (blending disabled), then deletes the FBO.
-# On citro3d: uses C3D_RenderTargetCreate on the new VRAM texture, calls
-#   C3D_DrawOn, and issues a GPU copy blit.
-#
-# CONTRACT: caller (grow) is responsible for:
-#   - flushing pending vertices before calling this
-#   - saving proj, activeShader, and the current RenderTargetHandle
-#   - restoring them after this returns
-#   - updating takenTiles and tile index remapping (CPU-only, stays in grow())
-#
-# WHY THIS BOUNDARY: grow() mixes state save/restore with tile bookkeeping.
-# The state save references boxy.layerNum (to find savedFramebuffer) and
-# boxy.proj. Passing the saved state as OUT parameters avoids giving the
-# backend a reference to Boxy; the actual restoration is done by Boxy.
+method createAtlasTexture*(backend: Backend, size: int): TextureHandle {.base.} =
+  ## Allocate a square GPU texture of side `size` pixels for the boxy atlas.
+  ## The returned handle has `width` and `height` set to `size`.
+  raise newException(BackendError, "createAtlasTexture not implemented")
 
-# proc blitAtlasToNewAtlas*(backend: BackendBase,
-#   old, `new`: TextureHandle,
-#   newSize: int32): void
+method deleteTexture*(backend: Backend, handle: TextureHandle) {.base.} =
+  ## Release the GPU resource associated with `handle`.
+  raise newException(BackendError, "deleteTexture not implemented")
 
-# 3b. compositeLayer — used by popLayer() (boxy.nim lines 710–780)
-#
-# Composites `src` (a layer texture) onto `dst` (the render target one level
-# down, or screen if layerNum will become -1) using blendMode and tint.
-#
-# On GL: sets glBlendFunc per blendMode, binds the appropriate shader, issues
-#   a full-screen draw, restores blend to ONE/ONE_MINUS_SRC_ALPHA.
-# For complex blendModes (not NormalBlend/MaskBlend/ScreenBlend): reads
-#   current dst into tmpTexture, binds both as TEXTURE0/TEXTURE1, uses
-#   blendShader with blendMode uniform.
-#
-# CONTRACT: caller (popLayer) passes:
-#   - src = layerTextures[layerNum] (the texture being popped)
-#   - dst = layerFramebuffers[layerNum - 1], or screen if layerNum == 0
-#   - blendMode, tint
-# Boxy decrements layerNum AFTER this call returns.
-#
-# WHY THIS BOUNDARY: popLayer interleaves dec(boxy.layerNum) with GL calls.
-# The dec determines which dst framebuffer to bind. Passing dst explicitly
-# lets the backend be stateless w.r.t. layer count.
+method createLayerTarget*(backend: Backend,
+    width, height: int32): tuple[tex: TextureHandle, rt: RenderTargetHandle] {.base.} =
+  ## Allocate a layer texture + framebuffer pair for pushLayer / popLayer.
+  ## On GL: glGenTextures + bindTextureData(nil) + glGenFramebuffers + attach.
+  ## On citro3d: C3D_TexInitRenderTarget + C3D_RenderTargetCreate.
+  raise newException(BackendError, "createLayerTarget not implemented")
 
-# proc compositeLayer*(backend: BackendBase,
-#   src: TextureHandle, dst: RenderTargetHandle,
-#   blendMode: BlendMode, tint: Color,
-#   frameSize: IVec2, atlasSize: int32): void
+method bindTarget*(backend: Backend, dst: RenderTargetHandle) {.base.} =
+  ## Bind `dst` as the active render target.
+  ## On GL: glBindFramebuffer(GL_FRAMEBUFFER, dst.id).
+  ## On citro3d: C3D_FrameDrawOn(target).
+  ## Boxy calls this in pushLayer and at the start of popLayer.
+  raise newException(BackendError, "bindTarget not implemented")
 
-# 3c. beginAtlasTarget / endAtlasTarget — atlas-as-RTT for PICA200 VRAM
-#
-# On GL: the atlas texture can be attached to an FBO at will. grow() already
-#   does this via glGenFramebuffers + drawToTexture.
-# On PICA200 (citro3d): textures and render targets share the same VRAM pool
-#   (C3D_BufInfo). A texture must be explicitly created as a render-target
-#   texture (C3D_TexInitRenderTarget) before it can be written by the GPU.
-#   This is a one-time allocation difference, not a per-frame bind.
-#
-# These two calls bracket the period where the atlas texture is used as a GPU
-# render target (currently only inside grow()). On GL they are no-ops.
-# On citro3d, beginAtlasTarget triggers a GPU flush + cache invalidation.
+method uploadTile*(backend: Backend, handle: TextureHandle,
+    x, y: int, image: Image, level: int) {.base.} =
+  ## Upload `image` to the sub-region at (x, y) / mip `level` of `handle`.
+  ## Single-level upload — replaces textures.updateSubImage(x, y, image, level).
+  ## The mip-walking loop (all levels) remains in Boxy.
+  raise newException(BackendError, "uploadTile not implemented")
 
-# proc beginAtlasTarget*(backend: BackendBase, atlas: TextureHandle): void
-# proc endAtlasTarget*(backend: BackendBase, atlas: TextureHandle): void
+method flush*(backend: Backend) {.base.} =
+  ## Submit any buffered draw calls to the GPU.
+  ## Called by Boxy before framebuffer switches that require a clean state.
+  raise newException(BackendError, "flush not implemented")
 
-# ---------------------------------------------------------------------------
-# SECTION 4: GL + bookkeeping interleaving analysis
-#
-# These are the sites in boxy.nim where GPU calls and Boxy bookkeeping are
-# so interleaved that simple field-wrapping (putting GL calls in the backend
-# while Boxy fields remain in Boxy) does not cleanly separate them. Each
-# entry notes WHY field-wrapping fails and what the chosen boundary is.
-# ---------------------------------------------------------------------------
+method beginAtlasTarget*(backend: Backend, atlas: TextureHandle) {.base.} =
+  ## Begin rendering into `atlas` as a GPU render target.
+  ## On citro3d: triggers a GPU flush + cache invalidation.
+  ## On GL: no-op (FBOs are attached on demand in grow()).
+  raise newException(BackendError, "beginAtlasTarget not implemented")
 
-# SITE 1: grow() lines 384–496
-#
-# Structure:
-#   [CPU]  check atlasSize == maxAtlasSize → may writeFile (emscripten-guarded)
-#   [GPU]  createAtlasTexture(newAtlasSize)
-#   [GPU]  glGenFramebuffers → attach to new texture
-#   [CPU]  save: savedFramebuffer = boxy.layerFramebuffers[boxy.layerNum]
-#          save: savedProj = boxy.proj
-#          save: savedShader = boxy.activeShader
-#   [GPU]  glBindFramebuffer, glViewport, glClearColor, glClear
-#   [CPU]  boxy.proj = ortho(...)
-#   [CPU]  boxy.activeShader = boxy.atlasShader
-#   [GPU]  glDisable(GL_BLEND)
-#   [GPU]  drawUvRect + flush (multiple GPU calls via flush)
-#   [CPU]  restore: boxy.proj, boxy.activeShader, boxy.layerFramebuffers
-#   [GPU]  glEnable(GL_BLEND), glBindFramebuffer, glViewport
-#   [GPU]  glDeleteFramebuffers, glDeleteTextures
-#   [CPU]  update boxy.atlasTexture, atlasSize, tileRun, maxTiles
-#   [CPU]  rebuild takenTiles BitArray
-#   [CPU]  remap every tile index from oldTileRun to newTileRun
-#
-# WHY FIELD-WRAPPING FAILS: The save block references boxy.layerNum to choose
-#   savedFramebuffer — the backend would need to know layerNum. The proj and
-#   shader saves write back to Boxy fields that are also used by flush(), which
-#   issues real GPU calls. Pulling the GPU part into blitAtlasToNewAtlas and
-#   keeping the save/restore in Boxy is the clean split.
-#
-# CHOSEN BOUNDARY: blitAtlasToNewAtlas (section 3a). Boxy calls it with the
-#   two TextureHandles and receives no output. Boxy performs save/restore
-#   around the call using its own fields.
-#
-# NOTE: The max-size error branch calls atlasTexture.writeFile() which is a
-#   pixie+file-I/O path guarded `when not defined(emscripten)` but NOT for ds3.
-#   Must add `when not defined(ds3)` guard or remove it entirely for the 3DS
-#   build (no filesystem before romfs is mounted).
+method endAtlasTarget*(backend: Backend, atlas: TextureHandle) {.base.} =
+  ## End rendering into `atlas` as a GPU render target.
+  ## On citro3d: triggers a GPU flush + cache sync.
+  ## On GL: no-op.
+  raise newException(BackendError, "endAtlasTarget not implemented")
 
-# SITE 2: popLayer() lines 700–780
-#
-# Structure:
-#   [CPU]  check layerNum >= 0
-#   [GPU]  flush()
-#   [CPU]  let layerTexture = boxy.layerTextures[boxy.layerNum]
-#   [CPU]  let savedAtlasTexture = boxy.atlasTexture
-#   [CPU]  dec boxy.layerNum
-#   [GPU]  … (varies by blendMode — up to 15 interleaved CPU/GPU lines)
-#   [CPU]  boxy.atlasTexture = savedAtlasTexture
-#   [GPU]  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-#   [CPU]  boxy.activeShader = boxy.atlasShader
-#
-# WHY FIELD-WRAPPING FAILS: dec(boxy.layerNum) happens BEFORE the GPU calls
-#   that decide which FBO to bind. The destination FBO is
-#   `boxy.layerFramebuffers[boxy.layerNum]` AFTER dec. Extracting the GL
-#   calls as-is would require the backend to know the post-dec layerNum, which
-#   means either passing it explicitly or keeping layerNum in the backend (bad).
-#
-# CHOSEN BOUNDARY: compositeLayer (section 3b). Boxy computes the destination
-#   RenderTargetHandle before calling compositeLayer (post-dec logic stays in
-#   Boxy), then passes src and dst explicitly. The backend has no layerNum.
+method blitAtlasToNewAtlas*(backend: Backend,
+    old, `new`: TextureHandle) {.base.} =
+  ## Copy all content from `old` into `new` (twice the side length).
+  ## `new.width` == `new.height` == the new atlas size.
+  ## Called by grow(). Boxy saves/restores proj, activeShader, and the
+  ## current RenderTargetHandle around this call — the backend is stateless
+  ## w.r.t. those fields.
+  raise newException(BackendError, "blitAtlasToNewAtlas not implemented")
 
-# SITE 3: exitRawOpenGLMode() lines 342–358
-#
-# Structure (all GL):
-#   glBindVertexArray(boxy.vertexArrayId)
-#   glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, boxy.indices.buffer.bufferId)
-#   boxy.activeShader.bindAttrib("vertexPos",   boxy.positions.buffer)
-#   boxy.activeShader.bindAttrib("vertexColor", boxy.colors.buffer)
-#   boxy.activeShader.bindAttrib("vertexUv",    boxy.uvs.buffer)
-#   glBindFramebuffer(GL_FRAMEBUFFER,
-#     if boxy.layerNum >= 0: boxy.layerFramebuffers[boxy.layerNum] else: 0)
-#   glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-#
-# WHY FIELD-WRAPPING FAILS: This is the full Boxy GL state contract — every
-#   GL handle that Boxy manages is re-bound here. Adding a backend layer means
-#   this becomes `backend.restoreState(snapshot)` where snapshot captures all
-#   the IDs above. The snapshot must be value-typed (no Boxy reference) to
-#   maintain ARC safety.
-#
-# CHOSEN BOUNDARY: `backend.restoreState(s: BackendStateSnapshot)` where
-#   BackendStateSnapshot is a plain object:
-#     type BackendStateSnapshot* = object
-#       vertexArrayId: int
-#       indexBufferId:  int
-#       posAttribId:    int
-#       colorAttribId:  int
-#       uvAttribId:     int
-#       framebufferId:  int   ## 0 = screen
-#   Boxy populates this before calling enterRawOpenGLMode and passes it to
-#   exitRawOpenGLMode → restoreState. The public API shape is unchanged.
+method compositeLayer*(backend: Backend,
+    src: TextureHandle,
+    dst: RenderTargetHandle,
+    dstTexture: TextureHandle,
+    blendMode: BlendMode, tint: Color,
+    frameSize: IVec2, atlasSize: int) {.base.} =
+  ## Composite `src` (popped layer texture) onto `dst` (next layer or screen).
+  ## Called by popLayer(). Boxy passes dst and dstTexture explicitly so the
+  ## backend has no layerNum dependency.
+  ##
+  ## `dstTexture` is the backing texture of `dst`:
+  ##   - GL-blend path (NormalBlend/MaskBlend/ScreenBlend): `dstTexture` may
+  ##     be a zero handle (`defaultRenderTarget()`); the backend draws into
+  ##     `dst` using standard GL blending.
+  ##   - Shader-blend path (all other BlendMode values): both `src` and
+  ##     `dstTexture` are bound as samplers for `blendShader`. The backend
+  ##     owns the temp-texture/swap semantics for this path.
+  raise newException(BackendError, "compositeLayer not implemented")
 
-# ---------------------------------------------------------------------------
-# SECTION 5: Unsupported operations on citro3d (must guard at compile time)
-#
-# These exist in the current OpenGL backend and must be removed or
-# conditionally compiled out for ds3 targets.
-# ---------------------------------------------------------------------------
-
-# 5a. downloadTextureData / readImage (textures.nim:185–196, boxy.nim:74–76)
-#
-# GL: glGetTexImage reads back GPU texture data to CPU.
-# citro3d: no equivalent. PICA200 does not expose a texture readback path.
-#
-# Affected callers:
-#   readAtlas()        boxy.nim:74–76    → must `when not defined(ds3): ...`
-#   getImage()         boxy.nim:1169     → same guard
-#   atlasTexture.writeFile() inside grow()'s max-size error branch
-#                      boxy.nim:393–394  → same guard
-#
-# Implementation note: the emscripten branch already raises an exception
-# (textures.nim:187–191). The 3DS branch should do the same OR be removed
-# entirely at compile time via a `when defined(ds3)` guard.
-
-# 5b. Texture buffer objects (textures.nim:25–37, bindTextureBufferData)
-#
-# GL: GL_TEXTURE_BUFFER is an OpenGL 3.1+ extension.
-# citro3d: not supported. Boxy does not appear to use texture buffers in the
-# current codebase (grep shows bindTextureBufferData is defined but never
-# called from boxy.nim). Safe to exclude under `when not defined(ds3)`.
-
-# 5c. glGetIntegerv(GL_MAX_TEXTURE_SIZE, ...) in newBoxy() (boxy.nim:325–327)
-#
-# citro3d: maximum texture side = 1024 on PICA200. Must hardcode or use
-# ctrulib's GX_GetMaxTextureSize equivalent instead of querying GL.
+method restoreState*(backend: Backend, s: BackendStateSnapshot) {.base.} =
+  ## Re-bind VAO, IBO, and framebuffer from `s`.
+  ## Called by exitRawOpenGLMode(). The backend also re-establishes its own
+  ## vertex attribute binds (shader + position/color/uv buffers) from its
+  ## own owned state — those are not in the snapshot.
+  raise newException(BackendError, "restoreState not implemented")
