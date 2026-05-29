@@ -18,6 +18,7 @@ nimcache
 *.dll
 *.out
 tmp/
+build/
 
 # Beads / Dolt files (added by bd init)
 .dolt/
