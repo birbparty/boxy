@@ -59,9 +59,11 @@ type
 # ---------------------------------------------------------------------------
 # SECTION 2: Backend object graph — ARC cycle safety
 #
-# ARC (--gc:arc, required for 3DS) has NO cycle collector. --gc:orc is
-# incompatible with this target. Therefore Boxy and its backend must form a
-# DAG, not a cycle.
+# ARC (--mm:arc) is the chosen GC for 3DS: deterministic, smallest footprint,
+# no background cycle-collector cost. ARC has no cycle collector, so to stay
+# leak-free under ARC the Boxy<->backend object graph must be a DAG, not a
+# cycle. (ORC would also compile on ARM/embedded, but we deliberately avoid
+# its overhead and non-determinism.)
 #
 # SAFE layout:
 #   Boxy (ref) ──owns──► BackendGL (ref)   [GL implementation]

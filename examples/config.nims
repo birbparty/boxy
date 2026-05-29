@@ -52,20 +52,21 @@ when defined(emscripten):
     echo "emrun examples/" & projectName() & ".html"
 
 when defined(ds3):
-  --gc:arc
-  --mm:arc
+  --mm:arc                          # --mm:arc implies --gc:arc; no need to set both
   -d:useMalloc
   --define:nimAllocPagesViaMalloc
   --define:noSignalHandler
   --opt:size
-  --cpu:arm
-  --os:linux
-  --noMain:on
-  # Suppress desktop-only linking (windy, opengl) — 3DS uses citro3d, not GL.
+  # --cpu:arm and --os:linux are set in nim_3ds.cfg; defining them here too would
+  # cause redundancy and possible drift — the cfg is the single source of truth.
+  --noMain:on                       # 3DS entry point is provided by libctru; a future
+                                    # entry-point file must call NimMain() explicitly.
+  # Forward-looking: consumed once boxy.nim/textures.nim gate `import opengl`
+  # behind `when not defined(noOpenGL)`. No effect yet — see boxy-0hw.
   --define:noOpenGL
   --define:ds3NoWindy
 
-when not defined(debug):
+when not defined(debug) and not defined(ds3):
   --define:noAutoGLerrorCheck
   --define:release
   --define:ssl
