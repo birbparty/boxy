@@ -132,10 +132,11 @@ when defined(ds3):
     ## See VRAM budget comment above.
 
   const maxTexSlots = 16
-  const maxRtSlots  = 8
+  const maxRtSlots  = 4
     ## Maximum simultaneous render-target slots (layer count cap).
-    ## At 512×256×4 = 512 KB per slot, 8 slots = 4 MB for layers.
+    ## At 512×256×4 = 512 KB per slot, 4 slots = 2 MB for layers.
     ## Combined with the max 1024² atlas (4 MB), total stays within 6 MB VRAM.
+    ## (8 slots × 512 KB = 4 MB + 4 MB atlas = 8 MB, which would exceed the 6 MB ceiling.)
 
   const vramBudgetBytes = 6 * 1024 * 1024
     ## Hard VRAM ceiling (bytes). Atlas + layers must fit within this.
@@ -171,7 +172,9 @@ when defined(ds3):
 
     RtSlot = object
       rt: ptr C3D_RenderTarget
+      bytes: int    ## actual VRAM bytes of backing texture (for accurate budget sums)
       used: bool
+      cleared: bool ## false until first bindTarget call clears uninitialized VRAM
 
     Citro3dBackend* = ref object of Backend
       ## Nintendo 3DS citro3d rendering backend.
@@ -203,6 +206,8 @@ when defined(ds3):
     result = Citro3dBackend()
     for i in 0 ..< maxTexSlots:
       result.texSlots[i].linkedRt = -1
+    # RtSlot zero-init: used=false, cleared=false, rt=nil, bytes=0 is correct.
+    # No explicit rtSlots loop needed — Nim ref object fields default to zero.
 
   proc allocTexSlot(b: Citro3dBackend): int =
     for i in 0 ..< maxTexSlots:
@@ -267,8 +272,10 @@ when defined(ds3):
     let ri = b.texSlots[i].linkedRt
     if ri >= 0 and b.rtSlots[ri].used:
       c3dRenderTargetDelete(b.rtSlots[ri].rt)
-      b.rtSlots[ri].rt   = nil
-      b.rtSlots[ri].used = false
+      b.rtSlots[ri].rt      = nil
+      b.rtSlots[ri].bytes   = 0
+      b.rtSlots[ri].used    = false
+      b.rtSlots[ri].cleared = false
     c3dTexDelete(addr b.texSlots[i].tex)
     if b.texSlots[i].mirror != nil:
       linearFree(b.texSlots[i].mirror)
@@ -323,6 +330,8 @@ when defined(ds3):
     ## Called once on the first blitAtlasToNewAtlas invocation.
     # Copy the module-level const into a backend heap field so DVLB_s
     # has a stable pointer that lives as long as the backend ref object.
+    # INVARIANT: do not mutate or resize b.shbinData after this point —
+    # DVLB_s holds an internal pointer into it and does not track reallocations.
     b.shbinData = shbinDataConst
     b.dvlb = dvlbParseFile(
       cast[ptr uint32](unsafeAddr b.shbinData[0]),
@@ -650,29 +659,36 @@ when defined(ds3):
     ##
     ## Returned TextureHandle carries the padded (POT) dimensions in width/height.
     ## compositeLayer reads these to compute UV bounds for the visible sub-region.
-    let texW = nextPOT(width.int)
-    let texH = nextPOT(height.int)
+    if width <= 0 or height <= 0:
+      raise newException(BackendError, "createLayerTarget: non-positive dimensions")
+    let texW = max(8, nextPOT(width.int))   # PICA200 minimum texture dim is 8
+    let texH = max(8, nextPOT(height.int))
     let layerBytes = texW * texH * 4
 
-    # VRAM budget check
+    # VRAM budget check: sum actual bytes of existing slots (not all at new layer size).
+    # Budget is color-only (depthFmt=-1 means no depth allocation). Does not account
+    # for VRAM allocator alignment overhead; treat as a conservative lower bound.
     let atlasBytes = if b.atlasSideLen > 0: b.atlasSideLen * b.atlasSideLen * 4 else: 0
     var usedRtBytes = 0
     for i in 0 ..< maxRtSlots:
       if b.rtSlots[i].used:
-        usedRtBytes += layerBytes  # conservative: same size per slot
+        usedRtBytes += b.rtSlots[i].bytes
     if atlasBytes + usedRtBytes + layerBytes > vramBudgetBytes:
       raise newException(BackendError,
         "createLayerTarget: VRAM budget exceeded — atlas (" & $atlasBytes &
         " B) + existing layers (" & $usedRtBytes &
         " B) + new layer (" & $layerBytes & " B) > " & $vramBudgetBytes & " B")
 
+    # Allocate both slots before touching the GPU so neither can leak if the other fails.
+    # allocTexSlot / allocRtSlot are side-effect-free scans; they hold no GPU resources.
     let ti = b.allocTexSlot()
+    let ri = b.allocRtSlot()
+
     if not c3dTexInitVram(addr b.texSlots[ti].tex,
                           uint16(texW), uint16(texH), GPU_RGBA8):
       raise newException(BackendError,
         "createLayerTarget: C3D_TexInitVRAM failed for " & $texW & "×" & $texH)
 
-    let ri = b.allocRtSlot()
     let rt = c3dRenderTargetCreateFromTex(
       addr b.texSlots[ti].tex, GPU_TEXFACE_2D, 0, -1)
     if rt == nil:
@@ -680,12 +696,17 @@ when defined(ds3):
       raise newException(BackendError,
         "createLayerTarget: C3D_RenderTargetCreateFromTex failed")
 
-    b.texSlots[ti].mirror   = nil     # VRAM-only; no CPU mirror needed for RTT
-    b.texSlots[ti].sideLen  = texW    # square-ish; texW used for slot bookkeeping
+    # sideLen stores texW (the width) for bookkeeping; layer textures are rectangular
+    # (e.g. 512×256), not square like atlas textures. uploadTile / blitAtlasToNewAtlas
+    # must never be called on a layer slot (they use sideLen as a square side).
+    b.texSlots[ti].mirror   = nil
+    b.texSlots[ti].sideLen  = texW
     b.texSlots[ti].used     = true
     b.texSlots[ti].linkedRt = ri
-    b.rtSlots[ri].rt   = rt
-    b.rtSlots[ri].used = true
+    b.rtSlots[ri].rt      = rt
+    b.rtSlots[ri].bytes   = layerBytes
+    b.rtSlots[ri].used    = true
+    b.rtSlots[ri].cleared = false  # uninitialized VRAM; cleared on first bindTarget call
 
     let tex = TextureHandle(id: ti + 1,
                             width:  int32(texW),
@@ -705,6 +726,10 @@ when defined(ds3):
     ## Must be called inside an open C3D frame (between C3D_FrameBegin and C3D_FrameEnd).
     ## Raises for the screen (id == 0) — the default/screen render target is not yet
     ## wired into the citro3d backend (tracked by the ds3 boxy.nim port tasks).
+    ##
+    ## First-use clear: c3dTexInitVram does not zero VRAM. On the first bindTarget call
+    ## for a freshly-created layer RT, this method clears to transparent black so the
+    ## layer starts fully transparent. This matches pushLayer's clearColor() in the GL path.
     if dst.isScreen():
       raise newException(BackendError,
         "bindTarget: screen render target not yet wired in the ds3 backend — " &
@@ -716,21 +741,25 @@ when defined(ds3):
     if not c3dFrameDrawOn(b.rtSlots[ri].rt):
       raise newException(BackendError,
         "bindTarget: C3D_FrameDrawOn failed — is a frame open?")
+    if not b.rtSlots[ri].cleared:
+      c3dRenderTargetClear(b.rtSlots[ri].rt, 1, 0x00000000'u32, 0)
+      b.rtSlots[ri].cleared = true
 
   # ---------------------------------------------------------------------------
   # beginAtlasTarget / endAtlasTarget — atlas-as-RTT sync points
   # ---------------------------------------------------------------------------
 
   method beginAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
-    ## Prepare to use `atlas` as a render target (for blitAtlasToNewAtlas / grow).
-    ## blitAtlasToNewAtlas manages its own mini-frame lifecycle, so no explicit
-    ## GPU-flush is required here. No-op on citro3d (same as on OpenGL).
+    ## Prepare to use `atlas` as a render target (called by boxy's grow() before
+    ## blitAtlasToNewAtlas). No-op on citro3d: blitAtlasToNewAtlas opens its own
+    ## C3D_FRAME_SYNCDRAW mini-frame and manages the full GPU lifecycle itself.
+    ## See blitAtlasToNewAtlas for the flush/sync that makes this safe.
     discard
 
   method endAtlasTarget*(b: Citro3dBackend, atlas: TextureHandle) =
-    ## Finish using `atlas` as a render target.
-    ## No-op on citro3d (same as on OpenGL); blitAtlasToNewAtlas calls c3dFrameEnd
-    ## internally before returning, so the GPU has already drained.
+    ## End rendering into `atlas` as a render target (called after blitAtlasToNewAtlas).
+    ## No-op on citro3d: blitAtlasToNewAtlas already called c3dFrameEnd before returning,
+    ## so the GPU has drained and VRAM is coherent before this is called.
     discard
 
   # ---------------------------------------------------------------------------
@@ -765,13 +794,25 @@ when defined(ds3):
         "compositeLayer: blend mode " & $blendMode &
         " requires shader-blend path — not yet implemented on PICA200 fixed-function TEV")
 
+    if frameSize.x <= 0 or frameSize.y <= 0:
+      raise newException(BackendError, "compositeLayer: non-positive frameSize")
+
     let si = b.slotIndex(src)
     if si < 0:
       raise newException(BackendError, "compositeLayer: invalid src TextureHandle")
+    if src.width <= 0 or src.height <= 0:
+      raise newException(BackendError, "compositeLayer: src has non-positive dimensions")
+
     let ri = dst.id - 1
     if ri < 0 or ri >= maxRtSlots or not b.rtSlots[ri].used:
       raise newException(BackendError,
         "compositeLayer: invalid dst RenderTargetHandle (id=" & $dst.id & ")")
+
+    # Reject src aliasing dst (read-after-write hazard on PICA200).
+    # backend_interface.nim:181 documents dstTexture as the hook for this check.
+    if dstTexture.id != 0 and dstTexture.id == src.id:
+      raise newException(BackendError,
+        "compositeLayer: src and dst alias the same surface (read-after-write hazard)")
 
     if not b.shaderReady:
       b.initBlitShader()
@@ -803,6 +844,14 @@ when defined(ds3):
     # Alpha blend by mode. All paths use premultiplied-alpha colors (from asRgbx).
     case blendMode
     of MaskBlend:
+      # DEGRADED APPROXIMATION: the GL path also binds maskShader (a fragment shader
+      # that broadcasts source alpha across RGB for luminance masking). PICA200 has no
+      # programmable shaders so maskShader is unavailable. The blend factors below
+      # (GPU_ZERO × src + GPU_SRC_COLOR × dst) replicate the blend equation but not
+      # the per-pixel RGB rebroadcast, so colored mask content will differ from desktop.
+      # This matches the project's documented plan: "achievable via fixed-function blend
+      # factors but without maskShader — document the degraded behaviour."
+      {.warning: "MaskBlend on PICA200 is a degraded approximation (maskShader unavailable); colored masks will differ from the desktop GL backend".}
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_ZERO, GPU_SRC_COLOR, GPU_ZERO, GPU_SRC_COLOR)
     of ScreenBlend:
@@ -817,6 +866,10 @@ when defined(ds3):
     # TEV stage 0: MODULATE (texture × vertex_color) for both RGB and alpha.
     # vertex_color carries the tint; the shader does NOT normalise GPU_UNSIGNED_BYTE,
     # so the 1/255 factor is applied by the shader (same as the quad batch path).
+    # Tint accuracy: asRgbx() premultiplies both the layer texture and the tint color.
+    # MODULATE then computes (premul_tex × premul_tint). For opaque white tint this is
+    # correct. For translucent or colored tints, verify against the GL backend on device
+    # before relying on this path — premul×premul may not match the GL fragment path.
     let env = c3dGetTexEnv(0)
     c3dTexEnvInit(env)
     c3dTexEnvSrc(env, C3D_BOTH_MODE, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0)
@@ -824,6 +877,13 @@ when defined(ds3):
     c3dDirtyTexEnv(env)
 
     # Bind the source layer texture to unit 0.
+    # Texture cache coherency: the src layer was rendered to in an earlier bindTarget call
+    # within the same C3D frame. C3D_FrameDrawOn (called above to switch to dst) may flush
+    # the prior render target's color buffer; if src was the immediately prior target, the
+    # frame switch provides the required write-back. If not, verify on hardware that a
+    # frame split or explicit sync is not needed before sampling. blitAtlasToNewAtlas
+    # sidesteps this by running in its own SYNCDRAW mini-frame; compositeLayer relies on
+    # the caller's frame boundary or the FrameDrawOn flush semantics.
     c3dTexBind(0, addr b.texSlots[si].tex)
 
     # Bind the compositing shader (already loaded by initBlitShader).
@@ -857,15 +917,28 @@ when defined(ds3):
 
     var bufInfo: C3D_BufInfo
     bufInfoInit(addr bufInfo)
+    # Permutation 0x210: buffer slot i → AttrInfo loader i (sequential), same as
+    # the blit and quad-batch paths. See blitAtlasToNewAtlas line ~502 for the reference.
     discard bufInfoAdd(addr bufInfo, b.blitVtxBuf, sizeof(RenderVtx), 3, 0x210'u64)
     c3dSetBufInfo(addr bufInfo)
 
-    # Index buffer: [3,0,1, 3,1,2] — same winding as blit quad (two CCW triangles).
-    # Re-use blitIdxBuf which was initialised in initBlitShader with pattern [0,1,2,1,3,2].
-    # Winding difference is acceptable — both produce the same quad, just different split.
+    # Re-use blitIdxBuf (actual pattern: [0,1,2, 1,3,2] from initBlitShader).
+    # Composite vertex order is v0=BL, v1=BR, v2=TR, v3=TL (differs from blit's
+    # v0=BL, v1=BR, v2=TL, v3=TR). The two orderings produce triangles along opposite
+    # diagonals but both tile the full quad — visually identical for a flat textured quad.
+    # Confirm winding is front-face CCW under the active cull mode on hardware.
     c3dDrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_BYTE, b.blitIdxBuf)
 
-    # Restore premultiplied-alpha blend for subsequent draw calls (matches flush() contract).
+    # Restore pipeline state for subsequent draws. The flush() contract says the caller
+    # re-establishes its own shader/TEV/blend; we restore TEV to REPLACE (simpler
+    # pass-through) and the blend to the normal premultiplied-alpha convention, so the
+    # next draw lands in a predictable state regardless of which blend mode was used here.
+    # Depth test: left disabled — 2D boxy draws do not use depth testing.
+    let envPost = c3dGetTexEnv(0)
+    c3dTexEnvInit(envPost)
+    c3dTexEnvSrc(envPost, C3D_BOTH_MODE, GPU_TEXTURE0, GPU_TEXTURE0, GPU_TEXTURE0)
+    c3dTexEnvFunc(envPost, C3D_BOTH_MODE, GPU_REPLACE)
+    c3dDirtyTexEnv(envPost)
     c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                   GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
                   GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
@@ -876,7 +949,8 @@ when defined(ds3):
 
   method restoreState*(b: Citro3dBackend, s: BackendStateSnapshot) =
     ## Re-bind shader, attribute/buffer info, and render target from `s`.
-    ## On citro3d: VAO and IBO fields of the snapshot are unused (citro3d has
-    ## no VAO concept). Only the framebuffer / render target is restored.
-    ## Not yet wired: no-op until the boxy.nim 3DS port is complete.
+    ## On citro3d: VAO and IBO snapshot fields are unused (citro3d has no VAO).
+    ## Not yet wired: no-op until the boxy.nim 3DS port wires enterRawOpenGLMode.
+    ## NOTE: compositeLayer partially restores pipeline state (TEV, blend) after each
+    ## call; restoreState is NOT the mechanism for that — see compositeLayer for details.
     discard
