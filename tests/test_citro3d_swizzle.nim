@@ -250,4 +250,68 @@ block:
   assertMsg(dst[off + 0] == 0xFB, "bottom-right corner: byte0=A")
   assertMsg(dst[off + 3] == 0xFE, "bottom-right corner: byte3=R")
 
+# ---------------------------------------------------------------------------
+# Part 6: topScreenOrthoProj — OrthoTilt matrix for PICA200 top screen
+#
+# Function must reproduce the exact {w,z,y,x} row values that milestone3_3ds
+# hardcodes for a 400×240 logical screen, and satisfy the coordinate mappings
+# documented in the function's comment block.
+#
+# PICA200 C3D_Mtx flat layout: result[i*4+0..3] = {w,z,y,x} for row i.
+# Row i dot-products with vertex (vx,vy,vz,vw=1):
+#   clip[i] = result[i*4+3]*vx + result[i*4+2]*vy + result[i*4+1]*vz + result[i*4+0]
+# ---------------------------------------------------------------------------
+
+block:
+  # Standard 3DS top screen: 400 logical pixels wide, 240 high.
+  let m = topScreenOrthoProj(400f, 240f)
+
+  # --- Row 0: clip_x = -(2/240)*y + 1 ---
+  assertMsg(m[0] == 1f,             "row0 w=1 (translation x)")
+  assertMsg(m[1] == 0f,             "row0 z=0 (clip_x has no z)")
+  block:
+    let expected = -2f / 240f
+    assertMsg(abs(m[2] - expected) < 1e-7f, "row0 y=-2/240 (y drives clip_x)")
+  assertMsg(m[3] == 0f,             "row0 x=0 (clip_x has no x)")
+
+  # --- Row 1: clip_y = -(2/400)*x + 1 ---
+  assertMsg(m[4] == 1f,             "row1 w=1 (translation y)")
+  assertMsg(m[5] == 0f,             "row1 z=0 (clip_y has no z)")
+  assertMsg(m[6] == 0f,             "row1 y=0 (clip_y has no y)")
+  block:
+    let expected = -2f / 400f
+    assertMsg(abs(m[7] - expected) < 1e-7f, "row1 x=-2/400 (x drives clip_y)")
+
+  # --- Row 2: clip_z = -z/1000 ---
+  assertMsg(m[8] == 0f,             "row2 w=0 (clip_z no translation)")
+  block:
+    let expected = -1f / 1000f
+    assertMsg(abs(m[9] - expected) < 1e-7f, "row2 z=-1/1000 (depth scale)")
+  assertMsg(m[10] == 0f,            "row2 y=0 (clip_z no y)")
+  assertMsg(m[11] == 0f,            "row2 x=0 (clip_z no x)")
+
+  # --- Row 3: clip_w = 1 (homogeneous) ---
+  assertMsg(m[12] == 1f,            "row3 w=1 (clip_w = 1)")
+  assertMsg(m[13] == 0f,            "row3 z=0")
+  assertMsg(m[14] == 0f,            "row3 y=0")
+  assertMsg(m[15] == 0f,            "row3 x=0")
+
+  # --- Coordinate sanity: logical centre (200, 120) → clip (0, 0) ---
+  # clip_x = -(2/240)*120 + 1 = -1 + 1 = 0
+  # clip_y = -(2/400)*200 + 1 = -1 + 1 = 0
+  let cx = m[3]*200f + m[2]*120f + m[1]*0f + m[0]  # row0 · (vx=200,vy=120,vz=0,vw=1)
+  let cy = m[7]*200f + m[6]*120f + m[5]*0f + m[4]  # row1 · vertex
+  assertMsg(abs(cx) < 1e-6f, "centre(200,120) → clip_x=0")
+  assertMsg(abs(cy) < 1e-6f, "centre(200,120) → clip_y=0")
+
+  # --- Coordinate sanity: top-left (0, 0) → clip (1, 1) ---
+  let tlx = m[3]*0f + m[2]*0f + m[1]*0f + m[0]
+  let tly = m[7]*0f + m[6]*0f + m[5]*0f + m[4]
+  assertMsg(abs(tlx - 1f) < 1e-6f, "top-left(0,0) → clip_x=1")
+  assertMsg(abs(tly - 1f) < 1e-6f, "top-left(0,0) → clip_y=1")
+
+  # --- Matches milestone3_3ds rows 0, 1, 3 exactly ---
+  assertMsg(abs(m[2] - (-1f / 120f)) < 1e-7f, "row0 y matches milestone3 -1/120")
+  assertMsg(abs(m[7] - (-1f / 200f)) < 1e-7f, "row1 x matches milestone3 -1/200")
+
 echo "ALL TESTS PASSED"

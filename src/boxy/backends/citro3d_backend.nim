@@ -95,6 +95,52 @@ proc swizzleTileIntoAtlas*(
       dst32[dstIdx] = pixieRgbaToGpuAbgr(src32[sy * srcW + sx])
 
 # ---------------------------------------------------------------------------
+# topScreenOrthoProj — OrthoTilt projection for the PICA200 top screen
+#
+# The 3DS top screen is physically 240×400 (rotated); raw citro3d renders
+# into a 240-wide × 400-tall GPU framebuffer and the display hardware
+# applies the 90° rotation to the LCD. To render Y-down logical coordinates
+# (0,0)→(logicalW×logicalH) without appearing sideways, the projection must
+# swap the x and y axis roles — equivalent to a 90° CCW rotation composed
+# with the standard orthographic projection.
+#
+# Derivation: compose ortho(0,W,H,0,-1000,1000) with a 90° CCW rotation:
+#   clip_x = -(2/H) · y + 1    (logical Y drives GPU horizontal)
+#   clip_y = -(2/W) · x + 1    (logical X drives GPU vertical)
+#   clip_z = -z / 1000
+#
+# PICA200 C3D_Mtx memory layout: each row stores components {w, z, y, x}
+# (FVec4_New(x,y,z,w) → {w,z,y,x} in memory). Row i computes clip[i] as
+# the dot product of the row with the vertex (vx, vy, vz, vw=1).
+#
+# This function has no citro3d dependency and compiles on any platform,
+# enabling host-side unit testing (see tests/test_citro3d_swizzle.nim).
+# ---------------------------------------------------------------------------
+
+func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
+  ## Returns the OrthoTilt projection for the PICA200 top screen as a flat
+  ## C3D_Mtx array in {w,z,y,x} row-major order, suitable for passing to
+  ## `c3dFVUnifMtx4x4` via `cast[ptr C3D_Mtx](addr result[0])`.
+  ##
+  ## Maps Y-down logical coordinates (0,0)→(logicalW×logicalH) correctly
+  ## onto the 3DS top screen (physically 240×400, rotated):
+  ##   clip_x = -(2/logicalH) · y + 1
+  ##   clip_y = -(2/logicalW) · x + 1
+  ##   clip_z = -z / 1000
+  ##
+  ## For the standard 400×240 top screen: `topScreenOrthoProj(400f, 240f)`.
+  ## Sanity check: logical centre (W/2, H/2) maps to clip (0, 0).
+  let scaleY = 2f / logicalH  # coefficient on y → clip_x
+  let scaleX = 2f / logicalW  # coefficient on x → clip_y
+  # Rows in {w, z, y, x} order:
+  result = [
+    1f,          0f,       -scaleY,  0f,       # clip_x = -y*(2/H) + 1
+    1f,          0f,        0f,      -scaleX,  # clip_y = -x*(2/W) + 1
+    0f, -1f/1000f,          0f,       0f,      # clip_z = -z/1000
+    1f,          0f,        0f,       0f,      # clip_w = 1
+  ]
+
+# ---------------------------------------------------------------------------
 # Citro3dBackend — Backend implementation for Nintendo 3DS
 #
 # Only compiled when --define:ds3 is active.
