@@ -340,4 +340,38 @@ block:
   assertMsg(abs(cx2) < 1e-6f, "320x240 centre(160,120) → clip_x=0")
   assertMsg(abs(cy2) < 1e-6f, "320x240 centre(160,120) → clip_y=0")
 
+# ---------------------------------------------------------------------------
+# Part 7: blendCategory — PICA200 blend mode classification
+#
+# Verifies that each BlendMode maps to the expected Pica200BlendCategory.
+# Only the four concrete hardware paths are tested here; "bcUnsupported"
+# is verified via a representative sample of the remainder.
+# ---------------------------------------------------------------------------
+
+import pixie   # bring BlendMode enum into scope
+
+# Concrete hardware paths.
+assertMsg(blendCategory(NormalBlend)    == bcNormal,    "NormalBlend → bcNormal")
+assertMsg(blendCategory(MultiplyBlend)  == bcMultiply,  "MultiplyBlend → bcMultiply")
+assertMsg(blendCategory(ScreenBlend)    == bcScreen,    "ScreenBlend → bcScreen")
+assertMsg(blendCategory(MaskBlend)      == bcMask,      "MaskBlend → bcMask")
+assertMsg(blendCategory(OverwriteBlend) == bcOverwrite, "OverwriteBlend → bcOverwrite (exact GPU_ONE/GPU_ZERO)")
+
+# All remaining modes fall back to bcUnsupported (complete coverage of all 22 modes).
+assertMsg(blendCategory(DarkenBlend)       == bcUnsupported, "DarkenBlend → bcUnsupported")
+assertMsg(blendCategory(ColorBurnBlend)    == bcUnsupported, "ColorBurnBlend → bcUnsupported")
+assertMsg(blendCategory(LightenBlend)      == bcUnsupported, "LightenBlend → bcUnsupported")
+assertMsg(blendCategory(ColorDodgeBlend)   == bcUnsupported, "ColorDodgeBlend → bcUnsupported")
+assertMsg(blendCategory(OverlayBlend)      == bcUnsupported, "OverlayBlend → bcUnsupported")
+assertMsg(blendCategory(SoftLightBlend)    == bcUnsupported, "SoftLightBlend → bcUnsupported")
+assertMsg(blendCategory(HardLightBlend)    == bcUnsupported, "HardLightBlend → bcUnsupported")
+assertMsg(blendCategory(DifferenceBlend)   == bcUnsupported, "DifferenceBlend → bcUnsupported")
+assertMsg(blendCategory(ExclusionBlend)    == bcUnsupported, "ExclusionBlend → bcUnsupported")
+assertMsg(blendCategory(HueBlend)          == bcUnsupported, "HueBlend → bcUnsupported")
+assertMsg(blendCategory(SaturationBlend)   == bcUnsupported, "SaturationBlend → bcUnsupported")
+assertMsg(blendCategory(ColorBlend)        == bcUnsupported, "ColorBlend → bcUnsupported")
+assertMsg(blendCategory(LuminosityBlend)   == bcUnsupported, "LuminosityBlend → bcUnsupported")
+assertMsg(blendCategory(SubtractMaskBlend) == bcUnsupported, "SubtractMaskBlend → bcUnsupported")
+assertMsg(blendCategory(ExcludeMaskBlend)  == bcUnsupported, "ExcludeMaskBlend → bcUnsupported")
+
 echo "ALL TESTS PASSED"
