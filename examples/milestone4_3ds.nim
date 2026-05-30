@@ -4,9 +4,11 @@
 ## for ARMv6K under devkitARM + --gc:arc. Tests:
 ##   1. pixie.newImage(4, 4) — heap allocation via libctru malloc
 ##   2. img.fill(rgbx(255, 0, 0, 255)) — pure CPU pixel write
-##   3. Clean exit via aptMainLoop
+##   3. doAssert on the first pixel — runtime check of alloc+fill+read
+##      (zippy inflate, PNG decode, and SIMD are compile-proven here, not run)
+##   4. Clean exit via aptMainLoop + HOME button
 ##
-## Expected: .3dsx loads and exits cleanly (HOME button or one frame).
+## Expected: .3dsx loads and exits cleanly on HOME-button press.
 ## A compile error here means pixie's ARMv6K path has broken; see
 ## docs/analysis/pixie-armv6k-compat.md for fallback strategy.
 ##
@@ -31,8 +33,10 @@ img.fill(rgbx(255, 0, 0, 255))
 doAssert img[0, 0] == rgbx(255, 0, 0, 255),
   "milestone4: pixie fill/read mismatch — CPU pixel path broken"
 
-# One aptMainLoop frame then exit (same pattern as blank_3ds.nim).
+# Idle until HOME button is pressed. svcSleepThread yields the ARM11 core
+# for ~16.7 ms per iteration (~60 Hz) — avoids 100% CPU spin on a gate that
+# renders nothing. Same idiom as milestone2_3ds.nim.
 while aptMainLoop():
-  discard
+  svcSleepThread(16_666_667)
 
 gfxExit()
