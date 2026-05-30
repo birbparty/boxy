@@ -647,14 +647,16 @@ proc addImage*(boxy: Boxy, key: string, image: Image, mipmaps: bool = true) =
       if not mipmaps:
         break
 
-      when defined(ds3):
-        break  # PICA200 atlas is single-level; uploadTile no-ops for level > 0
+      when not defined(ds3):
+        # PICA200 atlas is single-level; uploadTile no-ops for level > 0.
+        # On ds3 the while loop exits here — no mip levels are generated.
+        if img.width <= 1 or img.height <= 1:
+          break
 
-      if img.width <= 1 or img.height <= 1:
+        img = img.minifyBy2()
+        inc level
+      else:
         break
-
-      img = img.minifyBy2()
-      inc level
 
 proc getImageSize*(boxy: Boxy, key: string): IVec2 =
   ## Return the size of an inserted image.
@@ -1052,6 +1054,11 @@ proc endFrame*(boxy: Boxy) =
 
   boxy.frameBegun = false
   boxy.flush()
+
+proc destroy*(boxy: Boxy) =
+  ## Releases backend GPU resources (atlas texture, quad buffers, shaders).
+  ## On ds3: call before c3dFini. Idempotent — safe to call multiple times.
+  boxy.backend.destroy()
 
 proc applyTransform*(boxy: Boxy, m: Mat3) =
   ## Applies transform to the internal transform.
