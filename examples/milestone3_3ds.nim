@@ -10,9 +10,9 @@
 ##   6. One C3D_DrawElements call (6 uint16 indices, two CCW triangles)
 ##   7. Top screen render target (240×400 GPU fb) with OrthoTilt projection
 ##
-## OrthoTilt derivation: Mtx_OrthoTilt(0,400,240,0) for Y-down 400×240 logical space.
-##   Row 0: [0, -1/120, 0, 1]  logical→clip X
-##   Row 1: [-1/200, 0, 0, 1]  logical→clip Y
+## OrthoTilt projection: topScreenOrthoProj(400f, 240f) from citro3d_backend.
+##   clip_x = -(2/240)*y + 1   (logical Y drives GPU horizontal)
+##   clip_y = -(2/400)*x + 1   (logical X drives GPU vertical)
 ##   Verified: center(200,120)→clip(0,0); corners→physical screen corners.
 ##
 ## Quad: 200×200 logical square centered on the 400×240 screen.
@@ -40,24 +40,12 @@ const shbinRaw = staticRead("../build/render2d.shbin")
 # GX_TRANSFER_IN_FORMAT(RGBA8=0)=0 | GX_TRANSFER_OUT_FORMAT(RGB8=1)=0x1000
 const DISPLAY_FLAGS = 0x1000'u32
 
-# OrthoTilt projection for 400×240 Y-down logical space.
-# clip X = -logical_y / 120 + 1
-# clip Y = -logical_x / 200 + 1
-#
-# PICA200 LAYOUT: C3D_FVec stores components in {w,z,y,x} memory order, so each
-# row of the flat array must be written as [w, z, y, x], NOT [x, y, z, w].
-# FVec4_New(x,y,z,w) → {w,z,y,x} in memory (confirmed: types.h C3D_FVec union).
-# Intended rows in (x,y,z,w) terms and their [w,z,y,x] flat encoding:
-#   Row 0: (0, -1/120,  0,  1) → [1,  0,   -1/120,  0      ]
-#   Row 1: (-1/200, 0,  0,  1) → [1,  0,    0,      -1/200  ]
-#   Row 2: (0,  0,  2, -1)     → [-1, 2,    0,       0      ]
-#   Row 3: (0,  0,  0,  1)     → [1,  0,    0,       0      ]
-var projMat: array[16, float32] = [
-  1f,          0f,          -1f / 120f,   0f,
-  1f,          0f,           0f,          -1f / 200f,
-  -1f,         2f,           0f,           0f,
-  1f,          0f,           0f,           0f,
-]
+# OrthoTilt projection for 400×240 Y-down logical space, sourced from
+# citro3d_backend.topScreenOrthoProj — the single canonical definition for
+# the top-screen rotated projection (the compositing and identity matrices in
+# the backend are separate, non-rotated projections with different purposes).
+# See that function for the full derivation and PICA200 layout details.
+let projMat = topScreenOrthoProj(400f, 240f)
 
 # Vertex layout matching render2d.v.pica:
 #   v0 = position (x, y)      GPU_FLOAT × 2
