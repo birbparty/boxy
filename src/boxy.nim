@@ -189,8 +189,14 @@ when not defined(ds3):
 else:
   proc flush(boxy: Boxy) =
     ## Submit current quad batch via the citro3d backend.
-    ## Precondition: called inside an open C3D frame owned by the caller.
+    ## Precondition: called inside an open C3D frame (c3dFrameBegin..c3dFrameEnd)
+    ## with the render target already bound (c3dFrameDrawOn called by the app).
     boxy.entriesBuffered.clear()
+    if boxy.quadCount > 0:
+      # Set up PICA200 GPU state before submitting: shader, projection, TEV,
+      # atlas bind, blend. Uses downcast — safe: ds3 newBoxy always assigns
+      # Citro3dBackend, and prepareAtlasDraw is not in the Backend vtable.
+      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
     boxy.backend.flush()
     boxy.quadCount = 0
 

@@ -787,6 +787,62 @@ when defined(ds3):
                     C3D_UNSIGNED_SHORT, b.quadIdxBuf)
     b.quadCount = 0
 
+  proc prepareAtlasDraw*(b: Citro3dBackend, atlasHandle: TextureHandle,
+                         frameSize: IVec2) =
+    ## Set up PICA200 GPU state for the atlas draw path (drawImage / drawRect).
+    ##
+    ## Must be called inside an open C3D frame (after c3dFrameBegin and
+    ## c3dFrameDrawOn) and before flush(). Sets:
+    ##   - shader:     render2d.shbin (lazy-initialised on first call)
+    ##   - projection: topScreenOrthoProj for the physical 3DS top screen
+    ##                 (90° tilt compensation — use ONLY when rendering to the
+    ##                 physical screen via c3dFrameDrawOn(topScreenRT); for RTT
+    ##                 targets use the non-tilted ortho in compositeLayer)
+    ##   - TEV:        MODULATE = texture0 × primary_color (for tinting)
+    ##   - atlas tex:  atlasHandle bound to unit 0
+    ##   - blend:      premultiplied-alpha NormalBlend
+    ##
+    ## Caller pattern (in boxy.nim ds3 flush):
+    ##   b.prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
+    ##   b.flush()
+    if not b.shaderReady:
+      b.initBlitShader()
+
+    # Bind render2d shader (same binary used by blitAtlasToNewAtlas).
+    c3dBindProgram(addr b.shaderProg)
+
+    # Upload tilted ortho projection for the PICA200 physical top screen.
+    # topScreenOrthoProj composes ortho(0,W,H,0) with a 90° CCW rotation so
+    # the logical frame (0,0)→(W,H) maps to the rotated physical display.
+    # compositeLayer uses a non-tilted ortho because it targets an RTT texture.
+    var proj = topScreenOrthoProj(frameSize.x.float32, frameSize.y.float32)
+    c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                     cast[ptr C3D_Mtx](addr proj[0]))
+
+    # Depth test off — boxy's draw path is purely 2D.
+    c3dDepthTest(false, 0, 0)
+
+    # Premultiplied-alpha NormalBlend (GPU_ONE × src + GPU_ONE_MINUS_SRC_ALPHA × dst).
+    c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                  GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
+                  GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
+
+    # TEV stage 0: MODULATE = texture0 × primary_color (vertex tint).
+    # Matches compositeLayer's TEV for the NormalBlend path.
+    let env = c3dGetTexEnv(0)
+    c3dTexEnvInit(env)
+    c3dTexEnvSrc(env, C3D_BOTH_MODE, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0)
+    c3dTexEnvFunc(env, C3D_BOTH_MODE, GPU_MODULATE)
+    c3dDirtyTexEnv(env)
+
+    # Bind the atlas texture to unit 0.
+    let si = b.slotIndex(atlasHandle)
+    if si >= 0:
+      c3dTexBind(0, addr b.texSlots[si].tex)
+    else:
+      raise newException(BackendError,
+        "prepareAtlasDraw: invalid atlasHandle (id=" & $atlasHandle.id & ")")
+
   # ---------------------------------------------------------------------------
   # nextPOT — smallest power-of-two ≥ n
   # ---------------------------------------------------------------------------
