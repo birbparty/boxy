@@ -13,8 +13,11 @@
 # Usage:
 #   scripts/build_3ds.sh <target.nim> [<output-name>]
 #
-#   target.nim   Nim source file to compile (required — no ds3-ready example exists yet)
+#   target.nim   Nim source file to compile (e.g. examples/basic_3ds.nim)
 #   output-name  Base name for .elf / .3dsx / .smdh   (default: boxy3ds)
+#
+# Example (milestone 5 — full boxy API gate):
+#   scripts/build_3ds.sh examples/basic_3ds.nim basic_3ds
 #
 # Prerequisites (install via dkp-pacman -S 3ds-dev):
 #   - nim            (Nim compiler, in PATH)
