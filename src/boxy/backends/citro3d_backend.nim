@@ -791,16 +791,39 @@ when defined(ds3):
                          frameSize: IVec2) =
     ## Set up PICA200 GPU state for the atlas draw path (drawImage / drawRect).
     ##
-    ## Must be called inside an open C3D frame (after c3dFrameBegin and
-    ## c3dFrameDrawOn) and before flush(). Sets:
+    ## PRECONDITIONS:
+    ##   1. quadCount > 0 — call only when there are quads to draw (boxy.nim flush
+    ##      enforces this; direct callers must check before invoking).
+    ##   2. Must be called inside an open C3D frame (after c3dFrameBegin and
+    ##      c3dFrameDrawOn) and before flush().
+    ##   3. The currently-bound render target MUST be the physical 3DS top screen.
+    ##      topScreenOrthoProj is hardwired here; it is wrong for the bottom
+    ##      screen and RTT targets (compositeLayer uses a non-tilted ortho for
+    ##      that reason). Renders to non-top-screen targets must supply their own
+    ##      projection and call the backend draw path directly.
+    ##
+    ## Pipeline state set:
     ##   - shader:     render2d.shbin (lazy-initialised on first call)
-    ##   - projection: topScreenOrthoProj for the physical 3DS top screen
-    ##                 (90° tilt compensation — use ONLY when rendering to the
-    ##                 physical screen via c3dFrameDrawOn(topScreenRT); for RTT
-    ##                 targets use the non-tilted ortho in compositeLayer)
-    ##   - TEV:        MODULATE = texture0 × primary_color (for tinting)
-    ##   - atlas tex:  atlasHandle bound to unit 0
+    ##   - projection: topScreenOrthoProj(frameSize) — 90° CCW tilt for the
+    ##                 physical top screen; beginFrame's proj argument is ignored
+    ##                 on ds3 for atlas draws
+    ##   - depth:      off (2D rendering only)
     ##   - blend:      premultiplied-alpha NormalBlend
+    ##   - TEV:        MODULATE = texture0 × primary_color (for per-vertex tinting)
+    ##                 Single stage; compositeLayer uses the same config for its
+    ##                 NormalBlend arm.
+    ##   - cull:       not set — inherits the PICA200 default cull state.
+    ##                 Atlas quads are wound to be front-facing under that default
+    ##                 (see index-buffer construction at initQuadBufs). Any code
+    ##                 between c3dFrameDrawOn and this proc that changes cull mode
+    ##                 will silently break atlas draws.
+    ##   - atlas tex:  atlasHandle bound to unit 0
+    ##
+    ## Single-flush-per-frame coupling: this proc is invoked once per frame,
+    ## immediately before the single draw submit, because the backend forbids
+    ## more than one flush() per frame (linearAlloc vertex buffer, queuable
+    ## C3D_DrawElements). If a ring-buffer change ever lifts that constraint, the
+    ## per-flush state-setup story must be revisited.
     ##
     ## Caller pattern (in boxy.nim ds3 flush):
     ##   b.prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
@@ -841,7 +864,9 @@ when defined(ds3):
       c3dTexBind(0, addr b.texSlots[si].tex)
     else:
       raise newException(BackendError,
-        "prepareAtlasDraw: invalid atlasHandle (id=" & $atlasHandle.id & ")")
+        "prepareAtlasDraw: invalid atlasHandle (id=" & $atlasHandle.id &
+        ") — handle not allocated or already freed; check that newBoxy succeeded " &
+        "and destroy() has not been called")
 
   # ---------------------------------------------------------------------------
   # nextPOT — smallest power-of-two ≥ n
