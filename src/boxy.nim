@@ -1055,6 +1055,11 @@ proc endFrame*(boxy: Boxy) =
   boxy.frameBegun = false
   boxy.flush()
 
+proc destroy*(boxy: Boxy) =
+  ## Releases backend GPU resources (atlas texture, quad buffers, shaders).
+  ## On ds3: call before c3dFini. Idempotent — safe to call multiple times.
+  boxy.backend.destroy()
+
 proc applyTransform*(boxy: Boxy, m: Mat3) =
   ## Applies transform to the internal transform.
   boxy.mat = boxy.mat * m

@@ -67,15 +67,28 @@ c3dRenderTargetSetOutput(topScreen, GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS)
 # newBoxy initialises the citro3d atlas backend; must follow c3dInit.
 let bx = newBoxy()
 
-# addImage must be called outside a beginFrame/endFrame pair on ds3 — atlas
-# grow triggers c3dFrameBegin which cannot nest inside an open frame.
-if romfsInit() != 0:
+# Shared teardown helper — called from every exit path so they stay in sync.
+# destroy() releases VRAM atlas and quad buffers; must precede c3dFini().
+# destroy() is idempotent and safe to call before addImage completes.
+template shutdown() =
+  bx.destroy()
   c3dRenderTargetDelete(topScreen)
   c3dFini()
   gfxExit()
+
+# addImage must be called outside a beginFrame/endFrame pair on ds3 — atlas
+# grow triggers c3dFrameBegin which cannot nest inside an open frame.
+if romfsInit() != 0:
+  shutdown()
   quit(1)
 
-let img = readImage("romfs:/test.png")
+var img: Image
+try:
+  img = readImage("romfs:/test.png")
+except PixieError, IOError:
+  discard romfsExit()
+  shutdown()
+  quit(1)
 bx.addImage("test", img)
 discard romfsExit()
 
@@ -108,6 +121,4 @@ while aptMainLoop():
 # Teardown
 # ---------------------------------------------------------------------------
 
-c3dRenderTargetDelete(topScreen)
-c3dFini()
-gfxExit()
+shutdown()
