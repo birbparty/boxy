@@ -244,12 +244,12 @@ proc c3dTexBind*(unitId: int32, tex: ptr C3D_Tex)
 
 proc c3dRenderTargetCreate*(width, height: int32,
                              colorFmt: GpuColorBuf,
-                             depthFmt: int32): ptr C3D_RenderTarget
+                             depthFmt: cint): ptr C3D_RenderTarget
   {.importc: "C3D_RenderTargetCreate", header: "citro3d.h".}
 
 proc c3dRenderTargetCreateFromTex*(tex: ptr C3D_Tex, face: GpuTexFace,
                                    level: int32,
-                                   depthFmt: int32): ptr C3D_RenderTarget
+                                   depthFmt: cint): ptr C3D_RenderTarget
   {.importc: "C3D_RenderTargetCreateFromTex", header: "citro3d.h".}
 
 proc c3dRenderTargetDelete*(target: ptr C3D_RenderTarget)
