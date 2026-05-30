@@ -10,14 +10,9 @@ when not defined(ds3):
   export atlasVert, atlasMain, maskMain
   export pixie
 else:
-  # Seam import: not yet called in boxy.nim body — becomes load-bearing in boxy-25q.
-  # Do not remove: this import wires Citro3dBackend into the ds3 compilation unit.
+  import pixie
   import boxy/backends/citro3d_backend
-
-# NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
-# partial — proc bodies and transitive submodule imports (blends, textures,
-# shaders, buffers) still reference opengl/shady/pixie. Per-module wiring
-# is tracked in boxy-25q, boxy-4rj, boxy-duv, boxy-0vh, boxy-8o9.
+  export pixie
 
 const
   QuadLimit = 10_921 # 6 indices per quad, ensure indices stay in uint16 range
@@ -41,16 +36,20 @@ type
     oneColor: Color           ## If tiles = [] then this is the image's color.
 
   Boxy* = ref object
-    atlasShader, maskShader, blendShader, activeShader: Shader
-    blurXShader, blurYShader: Shader
-    spreadXShader, spreadYShader: Shader
-    atlasTexture*, tmpTexture: Texture
     when not defined(ds3):
+      atlasShader, maskShader, blendShader, activeShader: Shader
+      blurXShader, blurYShader: Shader
+      spreadXShader, spreadYShader: Shader
+      atlasTexture*, tmpTexture: Texture
       tmpFramebuffer: GLuint
+    else:
+      atlasHandle*: TextureHandle  ## ds3: atlas texture handle (citro3d backend)
     layerNum: int                    ## Index into layer textures for writing.
-    layerTextures: seq[Texture]      ## Layers array for pushing and popping.
     when not defined(ds3):
-      layerFramebuffers: seq[GLuint] ## Attachment targets for layer textures.
+      layerTextures: seq[Texture]      ## Layers array for pushing and popping.
+      layerFramebuffers: seq[GLuint]   ## Attachment targets for layer textures.
+    else:
+      layerRTs: seq[tuple[tex: TextureHandle, rt: RenderTargetHandle]]
     atlasSize: int                   ## Size x size dimensions of the atlas.
     quadCount: int                   ## Number of quads drawn so far in this batch.
     quadsPerBatch: int               ## Max quads in a batch before issuing an OpenGL call.
@@ -68,20 +67,15 @@ type
     when not defined(ds3):
       vertexArrayId: GLuint
     frameBegun: bool
-    maxAtlasSize: int
-    ## Rendering backend. On desktop (non-ds3) assigned in newBoxy via
-    ## newOpenGLBackend — non-nil for the lifetime of the Boxy instance.
-    ## On ds3 the citro3d backend is not yet wired (future adoption task);
-    ## on that path callers MUST NOT dispatch methods while it is nil —
-    ## nil ref dispatch segfaults; {.base.} BackendError does not protect
-    ## against a nil receiver.
-    backend*: Backend
-
-    # Buffer data for OpenGL
-    positions: tuple[buffer: Buffer, data: seq[float32]]
-    colors: tuple[buffer: Buffer, data: seq[uint8]]
-    uvs: tuple[buffer: Buffer, data: seq[float32]]
-    indices: tuple[buffer: Buffer, data: seq[uint16]]
+    when not defined(ds3):
+      maxAtlasSize: int
+    backend*: Backend                ## Rendering backend (OpenGL or citro3d).
+    when not defined(ds3):
+      # Buffer data for OpenGL
+      positions: tuple[buffer: Buffer, data: seq[float32]]
+      colors: tuple[buffer: Buffer, data: seq[uint8]]
+      uvs: tuple[buffer: Buffer, data: seq[float32]]
+      indices: tuple[buffer: Buffer, data: seq[uint16]]
 
 proc vec2(x, y: SomeNumber): Vec2 {.inline.} =
   ## Integer short cut for creating vectors.
@@ -93,99 +87,109 @@ proc `*`(a, b: Color): Color {.inline.} =
   result.b = a.b * b.b
   result.a = a.a * b.a
 
-proc readAtlas*(boxy: Boxy): Image =
-  ## Read the current atlas content.
-  boxy.atlasTexture.readImage()
+when not defined(ds3):
+  proc readAtlas*(boxy: Boxy): Image =
+    ## Read the current atlas content.
+    boxy.atlasTexture.readImage()
 
-proc upload(boxy: Boxy) =
-  ## When buffers change, uploads them to GPU.
-  boxy.positions.buffer.count = boxy.quadCount * 4
-  boxy.colors.buffer.count = boxy.quadCount * 4
-  boxy.uvs.buffer.count = boxy.quadCount * 4
-  boxy.indices.buffer.count = boxy.quadCount * 6
-  bindBufferData(boxy.positions.buffer, boxy.positions.data[0].addr)
-  bindBufferData(boxy.colors.buffer, boxy.colors.data[0].addr)
-  bindBufferData(boxy.uvs.buffer, boxy.uvs.data[0].addr)
+  proc upload(boxy: Boxy) =
+    ## When buffers change, uploads them to GPU.
+    boxy.positions.buffer.count = boxy.quadCount * 4
+    boxy.colors.buffer.count = boxy.quadCount * 4
+    boxy.uvs.buffer.count = boxy.quadCount * 4
+    boxy.indices.buffer.count = boxy.quadCount * 6
+    bindBufferData(boxy.positions.buffer, boxy.positions.data[0].addr)
+    bindBufferData(boxy.colors.buffer, boxy.colors.data[0].addr)
+    bindBufferData(boxy.uvs.buffer, boxy.uvs.data[0].addr)
 
 proc contains*(boxy: Boxy, key: string): bool {.inline.} =
   key in boxy.entries
 
-proc drawVertexArray(boxy: Boxy) =
-  glDrawElements(
-    GL_TRIANGLES,
-    boxy.indices.buffer.count.GLint,
-    boxy.indices.buffer.componentType,
-    nil
-  )
-  boxy.quadCount = 0
+when not defined(ds3):
+  proc drawVertexArray(boxy: Boxy) =
+    glDrawElements(
+      GL_TRIANGLES,
+      boxy.indices.buffer.count.GLint,
+      boxy.indices.buffer.componentType,
+      nil
+    )
+    boxy.quadCount = 0
 
-proc flush*(boxy: Boxy, useAtlas: bool = true) =
-  ## Flips - draws current buffer and starts a new one.
-  if boxy.quadCount == 0:
-    return
+  proc flush*(boxy: Boxy, useAtlas: bool = true) =
+    ## Flips - draws current buffer and starts a new one.
+    if boxy.quadCount == 0:
+      return
 
-  boxy.entriesBuffered.clear()
-  boxy.upload()
+    boxy.entriesBuffered.clear()
+    boxy.upload()
 
-  glActiveTexture(GL_TEXTURE0)
-  glBindTexture(GL_TEXTURE_2D, boxy.atlasTexture.textureId)
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, boxy.atlasTexture.textureId)
 
-  glUseProgram(boxy.activeShader.programId)
-  boxy.activeShader.setUniform("proj", boxy.proj)
-  if useAtlas:
-    boxy.activeShader.setUniform("atlasTex", 0)
-  boxy.activeShader.bindUniforms()
+    glUseProgram(boxy.activeShader.programId)
+    boxy.activeShader.setUniform("proj", boxy.proj)
+    if useAtlas:
+      boxy.activeShader.setUniform("atlasTex", 0)
+    boxy.activeShader.bindUniforms()
 
-  boxy.drawVertexArray()
+    boxy.drawVertexArray()
 
-proc checkFramebuffer() =
-  let status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
-  if status != GL_FRAMEBUFFER_COMPLETE:
-    raise newException(
-      BoxyError,
-      "Something wrong with layer framebuffer: " & $toHex(status.int32, 4)
+  proc checkFramebuffer() =
+    let status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+    if status != GL_FRAMEBUFFER_COMPLETE:
+      raise newException(
+        BoxyError,
+        "Something wrong with layer framebuffer: " & $toHex(status.int32, 4)
+      )
+
+  proc drawToTexture(boxy: Boxy, texture: Texture, framebufferId: GLuint) =
+    glBindFramebuffer(GL_FRAMEBUFFER, framebufferId)
+    glFramebufferTexture2D(
+      GL_FRAMEBUFFER,
+      GL_COLOR_ATTACHMENT0,
+      GL_TEXTURE_2D,
+      texture.textureId,
+      0
     )
 
-proc drawToTexture(boxy: Boxy, texture: Texture, framebufferId: GLuint) =
-  glBindFramebuffer(GL_FRAMEBUFFER, framebufferId)
-  glFramebufferTexture2D(
-    GL_FRAMEBUFFER,
-    GL_COLOR_ATTACHMENT0,
-    GL_TEXTURE_2D,
-    texture.textureId,
-    0
-  )
+  proc createAtlasTexture(boxy: Boxy, size: int): Texture =
+    result = Texture()
+    result.width = size.int32
+    result.height = size.int32
+    result.componentType = GL_UNSIGNED_BYTE
+    result.format = GL_RGBA
+    result.internalFormat = GL_RGBA8
+    result.magFilter = filterLinear
+    result.minFilter = filterLinear
+    result.useMipmap = false
+    bindTextureData(result, nil, false)
 
-proc createAtlasTexture(boxy: Boxy, size: int): Texture =
-  result = Texture()
-  result.width = size.int32
-  result.height = size.int32
-  result.componentType = GL_UNSIGNED_BYTE
-  result.format = GL_RGBA
-  result.internalFormat = GL_RGBA8
-  result.magFilter = filterLinear
-  result.minFilter = filterLinear
-  result.useMipmap = false
-  bindTextureData(result, nil, false)
+  proc addLayerTexture(boxy: Boxy) =
+    # Must be >0 for framebuffer creation below
+    # Set to real value in beginFrame
+    let layerTexture = Texture()
+    layerTexture.width = boxy.frameSize.x.int32
+    layerTexture.height = boxy.frameSize.y.int32
+    layerTexture.componentType = GL_UNSIGNED_BYTE
+    layerTexture.format = GL_RGBA
+    layerTexture.internalFormat = GL_RGBA8
+    layerTexture.magFilter = filterLinear
+    layerTexture.minFilter = filterLinear
+    bindTextureData(layerTexture, nil)
+    boxy.layerTextures.add(layerTexture)
 
-proc addLayerTexture(boxy: Boxy) =
-  # Must be >0 for framebuffer creation below
-  # Set to real value in beginFrame
-  let layerTexture = Texture()
-  layerTexture.width = boxy.frameSize.x.int32
-  layerTexture.height = boxy.frameSize.y.int32
-  layerTexture.componentType = GL_UNSIGNED_BYTE
-  layerTexture.format = GL_RGBA
-  layerTexture.internalFormat = GL_RGBA8
-  layerTexture.magFilter = filterLinear
-  layerTexture.minFilter = filterLinear
-  bindTextureData(layerTexture, nil)
-  boxy.layerTextures.add(layerTexture)
+    var layerFramebufferId: GLuint
+    glGenFramebuffers(1, layerFramebufferId.addr)
+    boxy.drawToTexture(layerTexture, layerFramebufferId)
+    boxy.layerFramebuffers.add(layerFramebufferId)
 
-  var layerFramebufferId: GLuint
-  glGenFramebuffers(1, layerFramebufferId.addr)
-  boxy.drawToTexture(layerTexture, layerFramebufferId)
-  boxy.layerFramebuffers.add(layerFramebufferId)
+else:
+  proc flush(boxy: Boxy) =
+    ## Submit current quad batch via the citro3d backend.
+    ## Precondition: called inside an open C3D frame owned by the caller.
+    boxy.entriesBuffered.clear()
+    boxy.backend.flush()
+    boxy.quadCount = 0
 
 proc addWhiteTile(boxy: Boxy)
 proc clearAtlas*(boxy: Boxy) =
@@ -193,174 +197,199 @@ proc clearAtlas*(boxy: Boxy) =
   boxy.takenTiles.clear()
   boxy.addWhiteTile()
 
-proc newBoxy*(
-  atlasSize = 512,
-  tileSize = 32,
-  tileMargin = 2,
-  quadsPerBatch = 1024
-): Boxy =
-  ## Creates a new Boxy with a specified atlas size and quads per batch.
-  if quadsPerBatch > QuadLimit:
-    raise newException(BoxyError, "Quads per batch cannot exceed " & $QuadLimit)
+when not defined(ds3):
+  proc newBoxy*(
+    atlasSize = 512,
+    tileSize = 32,
+    tileMargin = 2,
+    quadsPerBatch = 1024
+  ): Boxy =
+    ## Creates a new Boxy with a specified atlas size and quads per batch.
+    if quadsPerBatch > QuadLimit:
+      raise newException(BoxyError, "Quads per batch cannot exceed " & $QuadLimit)
 
-  result = Boxy()
-  result.atlasSize = atlasSize
-  result.quadsPerBatch = quadsPerBatch
-  result.mat = mat3()
-  result.mats = newSeq[Mat3]()
+    result = Boxy()
+    result.atlasSize = atlasSize
+    result.quadsPerBatch = quadsPerBatch
+    result.mat = mat3()
+    result.mats = newSeq[Mat3]()
 
-  result.atlasTexture = result.createAtlasTexture(atlasSize)
-  # Tile system initialization
-  result.tileMargin = tileMargin
-  result.tileSize = tileSize - result.tileMargin
-  if result.atlasSize mod (result.tileSize + result.tileMargin) != 0:
-    raise newException(BoxyError, "Atlas size must be a multiple of (tile size + 2)")
-  result.tileRun = result.atlasSize div (result.tileSize + result.tileMargin)
-  result.maxTiles = result.tileRun * result.tileRun
-  result.takenTiles = newBitArray(result.maxTiles)
+    result.atlasTexture = result.createAtlasTexture(atlasSize)
+    # Tile system initialization
+    result.tileMargin = tileMargin
+    result.tileSize = tileSize - result.tileMargin
+    if result.atlasSize mod (result.tileSize + result.tileMargin) != 0:
+      raise newException(BoxyError, "Atlas size must be a multiple of (tile size + 2)")
+    result.tileRun = result.atlasSize div (result.tileSize + result.tileMargin)
+    result.maxTiles = result.tileRun * result.tileRun
+    result.takenTiles = newBitArray(result.maxTiles)
 
-  result.layerNum = -1
+    result.layerNum = -1
 
-  when defined(emscripten):
-    result.atlasShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("atlasMain", toGLSL(atlasMain, "300 es", "precision highp float;\n"))
-    )
-    result.maskShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("maskMain", toGLSL(maskMain, "300 es", "precision highp float;\n"))
-    )
-    result.blendShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("blendingMain", toGLSL(blendingMain, "300 es", "precision highp float;\n"))
-    )
-    result.blurXShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("blendingMain", toGLSL(blurXMain, "300 es", "precision highp float;\n"))
-    )
-    result.blurYShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("blendingMain", toGLSL(blurYMain, "300 es", "precision highp float;\n"))
-    )
-    result.spreadXShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("spreadXMain", toGLSL(spreadXMain, "300 es", "precision highp float;\n"))
-    )
-    result.spreadYShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
-      ("spreadYMain", toGLSL(spreadYMain, "300 es", "precision highp float;\n"))
-    )
+    when defined(emscripten):
+      result.atlasShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("atlasMain", toGLSL(atlasMain, "300 es", "precision highp float;\n"))
+      )
+      result.maskShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("maskMain", toGLSL(maskMain, "300 es", "precision highp float;\n"))
+      )
+      result.blendShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("blendingMain", toGLSL(blendingMain, "300 es", "precision highp float;\n"))
+      )
+      result.blurXShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("blendingMain", toGLSL(blurXMain, "300 es", "precision highp float;\n"))
+      )
+      result.blurYShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("blendingMain", toGLSL(blurYMain, "300 es", "precision highp float;\n"))
+      )
+      result.spreadXShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("spreadXMain", toGLSL(spreadXMain, "300 es", "precision highp float;\n"))
+      )
+      result.spreadYShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "300 es", "precision highp float;\n")),
+        ("spreadYMain", toGLSL(spreadYMain, "300 es", "precision highp float;\n"))
+      )
 
-  else:
-    result.atlasShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("atlasMain", toGLSL(atlasMain, "410", ""))
-    )
-    result.maskShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("maskMain", toGLSL(maskMain, "410", ""))
-    )
-    result.blendShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("blendingMain", toGLSL(blendingMain, "410", ""))
-    )
-    result.blurXShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("blendingMain", toGLSL(blurXMain, "410", ""))
-    )
-    result.blurYShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("blendingMain", toGLSL(blurYMain, "410", ""))
-    )
-    result.spreadXShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("spreadXMain", toGLSL(spreadXMain, "410", ""))
-    )
-    result.spreadYShader = newShader(
-      ("atlasVert", toGLSL(atlasVert, "410", "")),
-      ("spreadYMain", toGLSL(spreadYMain, "410", ""))
-    )
+    else:
+      result.atlasShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("atlasMain", toGLSL(atlasMain, "410", ""))
+      )
+      result.maskShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("maskMain", toGLSL(maskMain, "410", ""))
+      )
+      result.blendShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("blendingMain", toGLSL(blendingMain, "410", ""))
+      )
+      result.blurXShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("blendingMain", toGLSL(blurXMain, "410", ""))
+      )
+      result.blurYShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("blendingMain", toGLSL(blurYMain, "410", ""))
+      )
+      result.spreadXShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("spreadXMain", toGLSL(spreadXMain, "410", ""))
+      )
+      result.spreadYShader = newShader(
+        ("atlasVert", toGLSL(atlasVert, "410", "")),
+        ("spreadYMain", toGLSL(spreadYMain, "410", ""))
+      )
 
-  result.positions.buffer = Buffer()
-  result.positions.buffer.componentType = cGL_FLOAT
-  result.positions.buffer.kind = bkVEC2
-  result.positions.buffer.target = GL_ARRAY_BUFFER
-  result.positions.data = newSeq[float32](
-    result.positions.buffer.kind.componentCount() * quadsPerBatch * 4
-  )
-
-  result.colors.buffer = Buffer()
-  result.colors.buffer.componentType = GL_UNSIGNED_BYTE
-  result.colors.buffer.kind = bkVEC4
-  result.colors.buffer.target = GL_ARRAY_BUFFER
-  result.colors.buffer.normalized = true
-  result.colors.data = newSeq[uint8](
-    result.colors.buffer.kind.componentCount() * quadsPerBatch * 4
-  )
-
-  result.uvs.buffer = Buffer()
-  result.uvs.buffer.componentType = cGL_FLOAT
-  result.uvs.buffer.kind = bkVEC2
-  result.uvs.buffer.target = GL_ARRAY_BUFFER
-  result.uvs.data = newSeq[float32](
-    result.uvs.buffer.kind.componentCount() * quadsPerBatch * 4
-  )
-
-  result.indices.buffer = Buffer()
-  result.indices.buffer.componentType = GL_UNSIGNED_SHORT
-  result.indices.buffer.kind = bkSCALAR
-  result.indices.buffer.target = GL_ELEMENT_ARRAY_BUFFER
-  result.indices.buffer.count = quadsPerBatch * 6
-
-  for i in 0 ..< quadsPerBatch:
-    let offset = i * 4
-    result.indices.data.add([
-      (offset + 3).uint16,
-      (offset + 0).uint16,
-      (offset + 1).uint16,
-      (offset + 2).uint16,
-      (offset + 3).uint16,
-      (offset + 1).uint16,
-    ])
-
-  # Indices are only uploaded once
-  bindBufferData(result.indices.buffer, result.indices.data[0].addr)
-
-  result.upload()
-
-  result.activeShader = result.atlasShader
-
-  # Only restoreState is currently routed through the backend (see exitRawOpenGLMode).
-  # The backend's atlas/layer/composite methods and its shaders/VAO are staged
-  # for a later adoption task and are not yet on any live draw path.
-  result.backend = newOpenGLBackend(emscripten = defined(emscripten))
-
-  glGenVertexArrays(1, result.vertexArrayId.addr)
-  glBindVertexArray(result.vertexArrayId)
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result.indices.buffer.bufferId)
-
-  result.activeShader.bindAttrib("vertexPos", result.positions.buffer)
-  result.activeShader.bindAttrib("vertexColor", result.colors.buffer)
-  result.activeShader.bindAttrib("vertexUv", result.uvs.buffer)
-
-  glBindFramebuffer(GL_FRAMEBUFFER, 0)
-
-  # Enable premultiplied alpha blending
-  glEnable(GL_BLEND)
-  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-
-  var maxAtlasSize: int32
-  glGetIntegerv(GL_MAX_TEXTURE_SIZE, maxAtlasSize.addr)
-  result.maxAtlasSize = maxAtlasSize
-
-  if result.maxAtlasSize < result.atlasSize:
-    raise newException(
-      BoxyError,
-      "Requested atlas texture is larger than max supported size: " &
-      $result.maxAtlasSize
+    result.positions.buffer = Buffer()
+    result.positions.buffer.componentType = cGL_FLOAT
+    result.positions.buffer.kind = bkVEC2
+    result.positions.buffer.target = GL_ARRAY_BUFFER
+    result.positions.data = newSeq[float32](
+      result.positions.buffer.kind.componentCount() * quadsPerBatch * 4
     )
 
-  result.addWhiteTile()
+    result.colors.buffer = Buffer()
+    result.colors.buffer.componentType = GL_UNSIGNED_BYTE
+    result.colors.buffer.kind = bkVEC4
+    result.colors.buffer.target = GL_ARRAY_BUFFER
+    result.colors.buffer.normalized = true
+    result.colors.data = newSeq[uint8](
+      result.colors.buffer.kind.componentCount() * quadsPerBatch * 4
+    )
+
+    result.uvs.buffer = Buffer()
+    result.uvs.buffer.componentType = cGL_FLOAT
+    result.uvs.buffer.kind = bkVEC2
+    result.uvs.buffer.target = GL_ARRAY_BUFFER
+    result.uvs.data = newSeq[float32](
+      result.uvs.buffer.kind.componentCount() * quadsPerBatch * 4
+    )
+
+    result.indices.buffer = Buffer()
+    result.indices.buffer.componentType = GL_UNSIGNED_SHORT
+    result.indices.buffer.kind = bkSCALAR
+    result.indices.buffer.target = GL_ELEMENT_ARRAY_BUFFER
+    result.indices.buffer.count = quadsPerBatch * 6
+
+    for i in 0 ..< quadsPerBatch:
+      let offset = i * 4
+      result.indices.data.add([
+        (offset + 3).uint16,
+        (offset + 0).uint16,
+        (offset + 1).uint16,
+        (offset + 2).uint16,
+        (offset + 3).uint16,
+        (offset + 1).uint16,
+      ])
+
+    # Indices are only uploaded once
+    bindBufferData(result.indices.buffer, result.indices.data[0].addr)
+
+    result.upload()
+
+    result.activeShader = result.atlasShader
+
+    result.backend = newOpenGLBackend(emscripten = defined(emscripten))
+
+    glGenVertexArrays(1, result.vertexArrayId.addr)
+    glBindVertexArray(result.vertexArrayId)
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, result.indices.buffer.bufferId)
+
+    result.activeShader.bindAttrib("vertexPos", result.positions.buffer)
+    result.activeShader.bindAttrib("vertexColor", result.colors.buffer)
+    result.activeShader.bindAttrib("vertexUv", result.uvs.buffer)
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0)
+
+    # Enable premultiplied alpha blending
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+
+    var maxAtlasSize: int32
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, maxAtlasSize.addr)
+    result.maxAtlasSize = maxAtlasSize
+
+    if result.maxAtlasSize < result.atlasSize:
+      raise newException(
+        BoxyError,
+        "Requested atlas texture is larger than max supported size: " &
+        $result.maxAtlasSize
+      )
+
+    result.addWhiteTile()
+
+else:
+  proc newBoxy*(
+    atlasSize = 512,
+    tileSize = 32,
+    tileMargin = 2,
+    quadsPerBatch = 1024
+  ): Boxy =
+    ## Creates a new Boxy for Nintendo 3DS (citro3d backend).
+    if quadsPerBatch > QuadLimit:
+      raise newException(BoxyError, "Quads per batch cannot exceed " & $QuadLimit)
+    result = Boxy()
+    result.atlasSize = atlasSize
+    result.quadsPerBatch = quadsPerBatch
+    result.mat = mat3()
+    result.mats = newSeq[Mat3]()
+    result.tileMargin = tileMargin
+    result.tileSize = tileSize - result.tileMargin
+    if result.atlasSize mod (result.tileSize + result.tileMargin) != 0:
+      raise newException(BoxyError, "Atlas size must be a multiple of (tile size + 2)")
+    result.tileRun = result.atlasSize div (result.tileSize + result.tileMargin)
+    result.maxTiles = result.tileRun * result.tileRun
+    result.takenTiles = newBitArray(result.maxTiles)
+    result.layerNum = -1
+    result.backend = newCitro3dBackend()
+    result.atlasHandle = result.backend.createAtlasTexture(atlasSize)
+    result.addWhiteTile()
 
 when defined(ds3):
   proc enterRawOpenGLMode*(boxy: Boxy) =
@@ -411,123 +440,132 @@ proc removeImage*(boxy: Boxy, key: string) =
           boxy.takenTiles.unsafeSetFalse(tile.index)
     boxy.entries.del(key)
 
-proc clearColor(boxy: Boxy) =
-  glClearColor(0, 0, 0, 0)
-  glClear(GL_COLOR_BUFFER_BIT)
+when not defined(ds3):
+  proc clearColor(boxy: Boxy) =
+    glClearColor(0, 0, 0, 0)
+    glClear(GL_COLOR_BUFFER_BIT)
 
-proc grow(boxy: Boxy) =
-  ## Grows the atlas size by 2 (growing area by 4) and repositions tiles.
-  if boxy.atlasSize == boxy.maxAtlasSize:
-    var images = boxy.entries.pairs().toSeq()
-    images.sort(proc(a, b: (string, ImageInfo)): int = cmp(-a[1].size.x * a[1].size.y, -b[1].size.x * b[1].size.y))
-    var i = 0
-    for image in images:
-      echo "  Image ", image[0], " size: ", image[1].size.x, "x", image[1].size.y
-      inc i
-    when not defined(emscripten) and not defined(ds3):
-      boxy.atlasTexture.writeFile("tmp/atlas.png")
-    raise newException(
-      BoxyError,
-      "Can't grow boxy atlas texture, max supported size reached: " &
-      $boxy.maxAtlasSize
+when not defined(ds3):
+  proc grow(boxy: Boxy) =
+    ## Grows the atlas size by 2 (growing area by 4) and repositions tiles.
+    if boxy.atlasSize == boxy.maxAtlasSize:
+      var images = boxy.entries.pairs().toSeq()
+      images.sort(proc(a, b: (string, ImageInfo)): int = cmp(-a[1].size.x * a[1].size.y, -b[1].size.x * b[1].size.y))
+      var i = 0
+      for image in images:
+        echo "  Image ", image[0], " size: ", image[1].size.x, "x", image[1].size.y
+        inc i
+      when not defined(emscripten):
+        boxy.atlasTexture.writeFile("tmp/atlas.png")
+      raise newException(
+        BoxyError,
+        "Can't grow boxy atlas texture, max supported size reached: " &
+        $boxy.maxAtlasSize
+      )
+
+    boxy.flush()
+
+    let
+      oldAtlasSize = boxy.atlasSize
+      newAtlasSize = oldAtlasSize * 2
+      oldTileRun = boxy.tileRun
+      newTileRun = newAtlasSize div (boxy.tileSize + boxy.tileMargin)
+
+    let newAtlasTexture = boxy.createAtlasTexture(newAtlasSize)
+
+    var newFramebuffer: GLuint
+    glGenFramebuffers(1, newFramebuffer.addr)
+    boxy.drawToTexture(newAtlasTexture, newFramebuffer)
+
+    let
+      savedFramebuffer = if boxy.layerNum >= 0:
+        boxy.layerFramebuffers[boxy.layerNum]
+      else:
+        0.GLuint
+      savedProj = boxy.proj
+      savedShader = boxy.activeShader
+
+    glBindFramebuffer(GL_FRAMEBUFFER, newFramebuffer)
+    glViewport(0, 0, newAtlasSize.int32, newAtlasSize.int32)
+    glClearColor(0, 0, 0, 0)
+    glClear(GL_COLOR_BUFFER_BIT)
+    boxy.proj = ortho(0.float32, newAtlasSize.float32, newAtlasSize.float32, 0, -1000, 1000)
+    boxy.activeShader = boxy.atlasShader
+    glDisable(GL_BLEND)
+
+    boxy.saveTransform()
+    boxy.mat = mat3()
+
+    boxy.drawUvRect(
+      at = vec2(0, newAtlasSize),
+      to = vec2(oldAtlasSize, oldAtlasSize),
+      uvAt = vec2(0, 0),
+      uvTo = vec2(oldAtlasSize, oldAtlasSize),
+      tint = color(1, 1, 1, 1)
     )
 
-  boxy.flush()
+    boxy.flush()
+    boxy.restoreTransform()
 
-  let
-    oldAtlasSize = boxy.atlasSize
-    newAtlasSize = oldAtlasSize * 2
-    oldTileRun = boxy.tileRun
-    newTileRun = newAtlasSize div (boxy.tileSize + boxy.tileMargin)
+    glEnable(GL_BLEND)
+    glBindFramebuffer(GL_FRAMEBUFFER, savedFramebuffer)
+    glViewport(0, 0, boxy.frameSize.x, boxy.frameSize.y)
+    boxy.proj = savedProj
+    boxy.activeShader = savedShader
 
-  # Create new atlas texture
-  let newAtlasTexture = boxy.createAtlasTexture(newAtlasSize)
+    glDeleteFramebuffers(1, newFramebuffer.addr)
+    glDeleteTextures(1, boxy.atlasTexture.textureId.addr)
 
-  # Create framebuffer for new atlas
-  var newFramebuffer: GLuint
-  glGenFramebuffers(1, newFramebuffer.addr)
-  boxy.drawToTexture(newAtlasTexture, newFramebuffer)
+    boxy.atlasTexture = newAtlasTexture
+    boxy.atlasSize = newAtlasSize
+    boxy.tileRun = newTileRun
+    boxy.maxTiles = newTileRun * newTileRun
 
-  # Save state
-  let
-    savedFramebuffer = if boxy.layerNum >= 0:
-      boxy.layerFramebuffers[boxy.layerNum]
-    else:
-      0.GLuint
-    savedProj = boxy.proj
-    savedShader = boxy.activeShader
+    var newTakenTiles = newBitArray(boxy.maxTiles)
+    newTakenTiles[0] = true # White tile
 
-  # Setup drawing to new atlas
-  glBindFramebuffer(GL_FRAMEBUFFER, newFramebuffer)
-  glViewport(0, 0, newAtlasSize.int32, newAtlasSize.int32)
+    for key, imageInfo in boxy.entries.mpairs:
+      for level in 0 ..< imageInfo.tiles.len:
+        for i in 0 ..< imageInfo.tiles[level].len:
+          if imageInfo.tiles[level][i].kind == tkIndex:
+            let
+              oldIndex = imageInfo.tiles[level][i].index
+              x = oldIndex mod oldTileRun
+              y = oldIndex div oldTileRun
+              newIndex = x + y * newTileRun
 
-  # Clear new atlas
-  glClearColor(0, 0, 0, 0)
-  glClear(GL_COLOR_BUFFER_BIT)
+            imageInfo.tiles[level][i].index = newIndex
+            newTakenTiles[newIndex] = true
 
-  # Setup projection for new atlas
-  boxy.proj = ortho(0.float32, newAtlasSize.float32, newAtlasSize.float32, 0, -1000, 1000)
+    boxy.takenTiles = newTakenTiles
 
-  # Use atlas shader
-  boxy.activeShader = boxy.atlasShader
-
-  # Disable blending for copy
-  glDisable(GL_BLEND)
-
-  # Draw old atlas into new atlas
-  boxy.saveTransform()
-  boxy.mat = mat3()
-
-  boxy.drawUvRect(
-    at = vec2(0, newAtlasSize),
-    to = vec2(oldAtlasSize, oldAtlasSize),
-    uvAt = vec2(0, 0),
-    uvTo = vec2(oldAtlasSize, oldAtlasSize),
-    tint = color(1, 1, 1, 1)
-  )
-
-  boxy.flush()
-
-  boxy.restoreTransform()
-
-  # Restore state
-  glEnable(GL_BLEND)
-  # If layerNum is -1, savedFramebuffer is 0.
-  glBindFramebuffer(GL_FRAMEBUFFER, savedFramebuffer)
-  glViewport(0, 0, boxy.frameSize.x, boxy.frameSize.y)
-  boxy.proj = savedProj
-  boxy.activeShader = savedShader
-
-  # Clean up temporary framebuffer
-  glDeleteFramebuffers(1, newFramebuffer.addr)
-
-  # Delete old atlas texture
-  glDeleteTextures(1, boxy.atlasTexture.textureId.addr)
-
-  # Update boxy
-  boxy.atlasTexture = newAtlasTexture
-  boxy.atlasSize = newAtlasSize
-  boxy.tileRun = newTileRun
-  boxy.maxTiles = newTileRun * newTileRun
-
-  # Rebuild takenTiles and update entries
-  var newTakenTiles = newBitArray(boxy.maxTiles)
-  newTakenTiles[0] = true # White tile
-
-  for key, imageInfo in boxy.entries.mpairs:
-    for level in 0 ..< imageInfo.tiles.len:
-      for i in 0 ..< imageInfo.tiles[level].len:
-        if imageInfo.tiles[level][i].kind == tkIndex:
-          let
-            oldIndex = imageInfo.tiles[level][i].index
-            x = oldIndex mod oldTileRun
-            y = oldIndex div oldTileRun
-            newIndex = x + y * newTileRun
-
-          imageInfo.tiles[level][i].index = newIndex
-          newTakenTiles[newIndex] = true
-
-  boxy.takenTiles = newTakenTiles
+else:
+  proc grow(boxy: Boxy) =
+    ## Grows the atlas on ds3 using the citro3d backend blit.
+    let oldAtlasSize = boxy.atlasSize
+    let newAtlasSize = oldAtlasSize * 2
+    let oldTileRun = boxy.tileRun
+    let newTileRun = newAtlasSize div (boxy.tileSize + boxy.tileMargin)
+    let newAtlasHandle = boxy.backend.createAtlasTexture(newAtlasSize)
+    boxy.backend.blitAtlasToNewAtlas(boxy.atlasHandle, newAtlasHandle)
+    boxy.backend.deleteTexture(boxy.atlasHandle)
+    boxy.atlasHandle = newAtlasHandle
+    boxy.atlasSize = newAtlasSize
+    boxy.tileRun = newTileRun
+    boxy.maxTiles = newTileRun * newTileRun
+    var newTakenTiles = newBitArray(boxy.maxTiles)
+    newTakenTiles[0] = true # White tile
+    for key, imageInfo in boxy.entries.mpairs:
+      for level in 0 ..< imageInfo.tiles.len:
+        for i in 0 ..< imageInfo.tiles[level].len:
+          if imageInfo.tiles[level][i].kind == tkIndex:
+            let oldIndex = imageInfo.tiles[level][i].index
+            let x = oldIndex mod oldTileRun
+            let y = oldIndex div oldTileRun
+            let newIndex = x + y * newTileRun
+            imageInfo.tiles[level][i].index = newIndex
+            newTakenTiles[newIndex] = true
+    boxy.takenTiles = newTakenTiles
 
 proc takeFreeTile(boxy: Boxy): int =
   let (found, index) = boxy.takenTiles.firstFalse
@@ -578,12 +616,21 @@ proc addImage*(boxy: Boxy, key: string, image: Image, mipmaps: bool = true) =
           else:
             let index = boxy.takeFreeTile()
             imageInfo.tiles[level].add(TileInfo(kind: tkIndex, index: index))
-            updateSubImage(
-              boxy.atlasTexture,
-              (index mod boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
-              (index div boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
-              tileImage
-            )
+            when not defined(ds3):
+              updateSubImage(
+                boxy.atlasTexture,
+                (index mod boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
+                (index div boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
+                tileImage
+              )
+            else:
+              boxy.backend.uploadTile(
+                boxy.atlasHandle,
+                (index mod boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
+                (index div boxy.tileRun) * (boxy.tileSize + boxy.tileMargin),
+                tileImage,
+                level
+              )
       if not mipmaps:
         break
 
@@ -598,79 +645,105 @@ proc getImageSize*(boxy: Boxy, key: string): IVec2 =
   boxy.entries[key].size
 
 proc checkBatch(boxy: Boxy) {.inline.} =
-  if boxy.quadCount == boxy.quadsPerBatch:
-    # This batch is full, draw and start a new batch.
-    boxy.flush()
+  when not defined(ds3):
+    if boxy.quadCount == boxy.quadsPerBatch:
+      boxy.flush()
 
-proc setVert(buf: var seq[float32], i: int, v: Vec2) =
-  buf[i * 2 + 0] = v.x
-  buf[i * 2 + 1] = v.y
+when not defined(ds3):
+  proc setVert(buf: var seq[float32], i: int, v: Vec2) =
+    buf[i * 2 + 0] = v.x
+    buf[i * 2 + 1] = v.y
 
-proc setVertColor(buf: var seq[uint8], i: int, rgbx: ColorRGBX) =
-  buf[i * 4 + 0] = rgbx.r
-  buf[i * 4 + 1] = rgbx.g
-  buf[i * 4 + 2] = rgbx.b
-  buf[i * 4 + 3] = rgbx.a
+  proc setVertColor(buf: var seq[uint8], i: int, rgbx: ColorRGBX) =
+    buf[i * 4 + 0] = rgbx.r
+    buf[i * 4 + 1] = rgbx.g
+    buf[i * 4 + 2] = rgbx.b
+    buf[i * 4 + 3] = rgbx.a
 
-proc drawQuad(
-  boxy: Boxy,
-  verts: array[4, Vec2],
-  uvs: array[4, Vec2],
-  tints: array[4, Color]
-) =
-  boxy.checkBatch()
+  proc drawQuad(
+    boxy: Boxy,
+    verts: array[4, Vec2],
+    uvs: array[4, Vec2],
+    tints: array[4, Color]
+  ) =
+    boxy.checkBatch()
 
-  let offset = boxy.quadCount * 4
-  boxy.positions.data.setVert(offset + 0, verts[0])
-  boxy.positions.data.setVert(offset + 1, verts[1])
-  boxy.positions.data.setVert(offset + 2, verts[2])
-  boxy.positions.data.setVert(offset + 3, verts[3])
+    let offset = boxy.quadCount * 4
+    boxy.positions.data.setVert(offset + 0, verts[0])
+    boxy.positions.data.setVert(offset + 1, verts[1])
+    boxy.positions.data.setVert(offset + 2, verts[2])
+    boxy.positions.data.setVert(offset + 3, verts[3])
 
-  boxy.uvs.data.setVert(offset + 0, uvs[0])
-  boxy.uvs.data.setVert(offset + 1, uvs[1])
-  boxy.uvs.data.setVert(offset + 2, uvs[2])
-  boxy.uvs.data.setVert(offset + 3, uvs[3])
+    boxy.uvs.data.setVert(offset + 0, uvs[0])
+    boxy.uvs.data.setVert(offset + 1, uvs[1])
+    boxy.uvs.data.setVert(offset + 2, uvs[2])
+    boxy.uvs.data.setVert(offset + 3, uvs[3])
 
-  boxy.colors.data.setVertColor(offset + 0, tints[0].asRgbx())
-  boxy.colors.data.setVertColor(offset + 1, tints[1].asRgbx())
-  boxy.colors.data.setVertColor(offset + 2, tints[2].asRgbx())
-  boxy.colors.data.setVertColor(offset + 3, tints[3].asRgbx())
+    boxy.colors.data.setVertColor(offset + 0, tints[0].asRgbx())
+    boxy.colors.data.setVertColor(offset + 1, tints[1].asRgbx())
+    boxy.colors.data.setVertColor(offset + 2, tints[2].asRgbx())
+    boxy.colors.data.setVertColor(offset + 3, tints[3].asRgbx())
 
-  inc boxy.quadCount
+    inc boxy.quadCount
 
-proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
-  ## Adds an image rect with a path to a ctx
-  ## at, to, uvAt, uvTo are all in pixels
-  let
-    posQuad = [
-      boxy.mat * vec2(at.x, to.y),
-      boxy.mat * vec2(to.x, to.y),
-      boxy.mat * vec2(to.x, at.y),
-      boxy.mat * vec2(at.x, at.y),
-    ]
-    uvAt = uvAt / boxy.atlasSize.float32
-    uvTo = uvTo / boxy.atlasSize.float32
-    uvQuad = [
-      vec2(uvAt.x, uvTo.y),
-      vec2(uvTo.x, uvTo.y),
-      vec2(uvTo.x, uvAt.y),
-      vec2(uvAt.x, uvAt.y),
-    ]
-    tints = [tint, tint, tint, tint]
+  proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
+    ## Adds an image rect with a path to a ctx
+    ## at, to, uvAt, uvTo are all in pixels
+    let
+      posQuad = [
+        boxy.mat * vec2(at.x, to.y),
+        boxy.mat * vec2(to.x, to.y),
+        boxy.mat * vec2(to.x, at.y),
+        boxy.mat * vec2(at.x, at.y),
+      ]
+      uvAt = uvAt / boxy.atlasSize.float32
+      uvTo = uvTo / boxy.atlasSize.float32
+      uvQuad = [
+        vec2(uvAt.x, uvTo.y),
+        vec2(uvTo.x, uvTo.y),
+        vec2(uvTo.x, uvAt.y),
+        vec2(uvAt.x, uvAt.y),
+      ]
+      tints = [tint, tint, tint, tint]
 
-  boxy.drawQuad(posQuad, uvQuad, tints)
+    boxy.drawQuad(posQuad, uvQuad, tints)
 
-proc addWhiteTile(boxy: Boxy) =
-  # Insert a solid white tile used for all one color draws.
-  let whiteTile = newImage(boxy.tileSize, boxy.tileSize)
-  whiteTile.fill(color(1, 1, 1, 1))
-  updateSubImage(
-    boxy.atlasTexture,
-    0,
-    0,
-    whiteTile
-  )
-  boxy.takenTiles[0] = true
+  proc addWhiteTile(boxy: Boxy) =
+    # Insert a solid white tile used for all one color draws.
+    let whiteTile = newImage(boxy.tileSize, boxy.tileSize)
+    whiteTile.fill(color(1, 1, 1, 1))
+    updateSubImage(boxy.atlasTexture, 0, 0, whiteTile)
+    boxy.takenTiles[0] = true
+
+else:
+  proc drawUvRect(boxy: Boxy, at, to, uvAt, uvTo: Vec2, tint: Color) =
+    ## Submit one textured quad to the citro3d backend.
+    ## at/to are screen-space pixel coords; uvAt/uvTo are atlas-space pixels.
+    let
+      posQuad = [
+        boxy.mat * vec2(at.x, to.y),
+        boxy.mat * vec2(to.x, to.y),
+        boxy.mat * vec2(to.x, at.y),
+        boxy.mat * vec2(at.x, at.y),
+      ]
+      uvAtN = uvAt / boxy.atlasSize.float32
+      uvToN = uvTo / boxy.atlasSize.float32
+      uvQuad = [
+        vec2(uvAtN.x, uvToN.y),
+        vec2(uvToN.x, uvToN.y),
+        vec2(uvToN.x, uvAtN.y),
+        vec2(uvAtN.x, uvAtN.y),
+      ]
+      tints = [tint, tint, tint, tint]
+    Citro3dBackend(boxy.backend).addQuad(posQuad, uvQuad, tints)
+    inc boxy.quadCount
+
+  proc addWhiteTile(boxy: Boxy) =
+    # Insert a solid white tile at atlas origin for solid-color draws.
+    let whiteTile = newImage(boxy.tileSize, boxy.tileSize)
+    whiteTile.fill(color(1, 1, 1, 1))
+    boxy.backend.uploadTile(boxy.atlasHandle, 0, 0, whiteTile, 0)
+    boxy.takenTiles[0] = true
 
 proc drawRect*(
   boxy: Boxy,
@@ -686,112 +759,172 @@ proc drawRect*(
       color
     )
 
-proc readyTmpTexture(boxy: Boxy) =
-  ## Makes sure boxy.tmpTexture is ready to be used.
-  # Create extra tmp texture if needed
-  if boxy.tmpTexture == nil:
-    boxy.tmpTexture = Texture()
-    boxy.tmpTexture.width = 1
-    boxy.tmpTexture.height = 1
-    boxy.tmpTexture.componentType = GL_UNSIGNED_BYTE
-    boxy.tmpTexture.format = GL_RGBA
-    boxy.tmpTexture.internalFormat = GL_RGBA8
-    boxy.tmpTexture.magFilter = filterLinear
-    boxy.tmpTexture.minFilter = filterLinear
-  # Resize extra blend texture if needed
-  if boxy.tmpTexture.width != boxy.frameSize.x.int32 or
-    boxy.tmpTexture.height != boxy.frameSize.y.int32:
-    boxy.tmpTexture.width = boxy.frameSize.x.int32
-    boxy.tmpTexture.height = boxy.frameSize.y.int32
-    bindTextureData(boxy.tmpTexture, nil)
-  if boxy.tmpFramebuffer == 0:
-    glGenFramebuffers(1, boxy.tmpFramebuffer.addr)
-    boxy.drawToTexture(boxy.tmpTexture, boxy.tmpFramebuffer)
-    checkFramebuffer()
-  else:
-    glBindFramebuffer(GL_FRAMEBUFFER, boxy.tmpFramebuffer)
+when not defined(ds3):
+  proc readyTmpTexture(boxy: Boxy) =
+    ## Makes sure boxy.tmpTexture is ready to be used.
+    if boxy.tmpTexture == nil:
+      boxy.tmpTexture = Texture()
+      boxy.tmpTexture.width = 1
+      boxy.tmpTexture.height = 1
+      boxy.tmpTexture.componentType = GL_UNSIGNED_BYTE
+      boxy.tmpTexture.format = GL_RGBA
+      boxy.tmpTexture.internalFormat = GL_RGBA8
+      boxy.tmpTexture.magFilter = filterLinear
+      boxy.tmpTexture.minFilter = filterLinear
+    if boxy.tmpTexture.width != boxy.frameSize.x.int32 or
+      boxy.tmpTexture.height != boxy.frameSize.y.int32:
+      boxy.tmpTexture.width = boxy.frameSize.x.int32
+      boxy.tmpTexture.height = boxy.frameSize.y.int32
+      bindTextureData(boxy.tmpTexture, nil)
+    if boxy.tmpFramebuffer == 0:
+      glGenFramebuffers(1, boxy.tmpFramebuffer.addr)
+      boxy.drawToTexture(boxy.tmpTexture, boxy.tmpFramebuffer)
+      checkFramebuffer()
+    else:
+      glBindFramebuffer(GL_FRAMEBUFFER, boxy.tmpFramebuffer)
 
-proc pushLayer*(boxy: Boxy) =
-  ## Starts drawing into a new layer.
-  if not boxy.frameBegun:
-    raise newException(BoxyError, "beginFrame has not been called")
+  proc pushLayer*(boxy: Boxy) =
+    ## Starts drawing into a new layer.
+    if not boxy.frameBegun:
+      raise newException(BoxyError, "beginFrame has not been called")
+    boxy.flush()
+    inc boxy.layerNum
+    if boxy.layerNum >= boxy.layerTextures.len:
+      boxy.addLayerTexture()
+    else:
+      glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[boxy.layerNum])
+    boxy.clearColor()
 
-  boxy.flush()
+  proc popLayer*(
+    boxy: Boxy,
+    tint = color(1, 1, 1, 1),
+    blendMode: BlendMode = NormalBlend
+  ) =
+    ## Pops the layer and draws with tint and blend.
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "popLayer called without pushLayer")
+    boxy.flush()
+    let layerTexture = boxy.layerTextures[boxy.layerNum]
+    let savedAtlasTexture = boxy.atlasTexture
+    dec boxy.layerNum
+    if blendMode in {NormalBlend, MaskBlend, ScreenBlend}:
+      glBindFramebuffer(GL_FRAMEBUFFER, if boxy.layerNum == -1: 0.GLuint else: boxy.layerFramebuffers[boxy.layerNum])
+      if blendMode == NormalBlend:
+        boxy.atlasTexture = layerTexture
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+        boxy.activeShader = boxy.atlasShader
+      elif blendMode == MaskBlend:
+        boxy.atlasTexture = layerTexture
+        glBlendFunc(GL_ZERO, GL_SRC_COLOR)
+        boxy.activeShader = boxy.maskShader
+      elif blendMode == ScreenBlend:
+        boxy.atlasTexture = layerTexture
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR)
+        boxy.activeShader = boxy.atlasShader
+      boxy.drawUvRect(
+        at = vec2(0, 0),
+        to = boxy.frameSize.vec2,
+        uvAt = vec2(0, boxy.atlasSize.float32),
+        uvTo = vec2(boxy.atlasSize.float32, 0),
+        tint = tint
+      )
+      boxy.flush(blendMode != MaskBlend)
+    else:
+      let
+        srcTexture = layerTexture
+        dstTexture = boxy.layerTextures[boxy.layerNum]
+      boxy.readyTmpTexture()
+      boxy.clearColor()
+      glActiveTexture(GL_TEXTURE0)
+      glBindTexture(GL_TEXTURE_2D, srcTexture.textureId)
+      glActiveTexture(GL_TEXTURE1)
+      glBindTexture(GL_TEXTURE_2D, dstTexture.textureId)
+      glUseProgram(boxy.blendShader.programId)
+      boxy.blendShader.setUniform("proj", boxy.proj)
+      boxy.blendShader.setUniform("srcTexture", 0)
+      boxy.blendShader.setUniform("dstTexture", 1)
+      boxy.blendShader.setUniform("blendMode", blendMode.ord.int32)
+      boxy.blendShader.bindUniforms()
+      boxy.drawUvRect(
+        at = vec2(0, 0),
+        to = boxy.frameSize.vec2,
+        uvAt = vec2(0, boxy.atlasSize.float32),
+        uvTo = vec2(boxy.atlasSize.float32, 0),
+        tint = tint
+      )
+      boxy.upload()
+      boxy.drawVertexArray()
+      swap boxy.layerTextures[boxy.layerNum], boxy.tmpTexture
+      swap boxy.layerFramebuffers[boxy.layerNum], boxy.tmpFramebuffer
+    boxy.atlasTexture = savedAtlasTexture
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+    boxy.activeShader = boxy.atlasShader
 
-  inc boxy.layerNum
-  if boxy.layerNum >= boxy.layerTextures.len:
-    boxy.addLayerTexture()
-  else:
-    glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[boxy.layerNum])
-
-  boxy.clearColor()
-
-proc popLayer*(
-  boxy: Boxy,
-  tint = color(1, 1, 1, 1),
-  blendMode: BlendMode = NormalBlend
-) =
-  ## Pops the layer and draws with tint and blend.
-  if boxy.layerNum == -1:
-    raise newException(BoxyError, "popLayer called without pushLayer")
-
-  boxy.flush()
-
-  let layerTexture = boxy.layerTextures[boxy.layerNum]
-  let savedAtlasTexture = boxy.atlasTexture
-  dec boxy.layerNum
-
-  if blendMode in {NormalBlend, MaskBlend, ScreenBlend}:
-    glBindFramebuffer(GL_FRAMEBUFFER, if boxy.layerNum == -1: 0.GLuint else: boxy.layerFramebuffers[boxy.layerNum])
-
-    # Can use OpenGL blending mode,
-    if blendMode == NormalBlend:
-      boxy.atlasTexture = layerTexture
-      glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-      boxy.activeShader = boxy.atlasShader
-    elif blendMode == MaskBlend:
-      boxy.atlasTexture = layerTexture
-      glBlendFunc(GL_ZERO, GL_SRC_COLOR)
-      boxy.activeShader = boxy.maskShader
-    elif blendMode == ScreenBlend:
-      boxy.atlasTexture = layerTexture
-      glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_COLOR)
-      boxy.activeShader = boxy.atlasShader
-
+  proc copyLowerToCurrent*(boxy: Boxy) =
+    ## Copies the immediately lower layer texture into the current layer.
+    if boxy.layerNum <= 0:
+      raise newException(BoxyError, "copyLowerToCurrent requires an active layer above a lower layer")
+    boxy.flush()
+    let srcTexture = boxy.layerTextures[boxy.layerNum - 1]
+    let savedAtlasTexture = boxy.atlasTexture
+    let savedShader = boxy.activeShader
+    boxy.atlasTexture = srcTexture
+    boxy.activeShader = boxy.atlasShader
     boxy.drawUvRect(
       at = vec2(0, 0),
       to = boxy.frameSize.vec2,
       uvAt = vec2(0, boxy.atlasSize.float32),
       uvTo = vec2(boxy.atlasSize.float32, 0),
-      tint = tint
+      tint = color(1, 1, 1, 1)
     )
-    boxy.flush(blendMode != MaskBlend)
+    boxy.flush()
+    boxy.atlasTexture = savedAtlasTexture
+    boxy.activeShader = savedShader
 
-  else:
-    let
-      srcTexture = layerTexture
-      dstTexture = boxy.layerTextures[boxy.layerNum]
-
-    # Can use OpenGL blending mode
+  proc blurEffect(
+    boxy: Boxy,
+    radius: float32,
+    tint: Color,
+    offset: Vec2,
+    readLayer: int,
+    writeLayer: int
+  ) =
+    ## Blurs the current layer
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "blurEffect called without pushLayer")
+    boxy.flush()
     boxy.readyTmpTexture()
     boxy.clearColor()
-
     glActiveTexture(GL_TEXTURE0)
-    glBindTexture(GL_TEXTURE_2D, srcTexture.textureId)
-
-    glActiveTexture(GL_TEXTURE1)
-    glBindTexture(GL_TEXTURE_2D, dstTexture.textureId)
-
-    glUseProgram(boxy.blendShader.programId)
-    boxy.blendShader.setUniform("proj", boxy.proj)
-    boxy.blendShader.setUniform("srcTexture", 0)
-    boxy.blendShader.setUniform("dstTexture", 1)
-    boxy.blendShader.setUniform("blendMode", blendMode.ord.int32)
-    boxy.blendShader.bindUniforms()
-
+    glBindTexture(GL_TEXTURE_2D, boxy.layerTextures[readLayer].textureId)
+    glUseProgram(boxy.blurXShader.programId)
+    boxy.blurXShader.setUniform("srcTexture", 0)
+    boxy.blurXShader.setUniform("proj", boxy.proj)
+    boxy.blurXShader.setUniform("pixelScale", 1 / boxy.frameSize.x.float32)
+    boxy.blurXShader.setUniform("blurRadius", radius)
+    boxy.blurXShader.bindUniforms()
     boxy.drawUvRect(
       at = vec2(0, 0),
       to = boxy.frameSize.vec2,
+      uvAt = vec2(0, boxy.atlasSize.float32),
+      uvTo = vec2(boxy.atlasSize.float32, 0),
+      tint = color(1, 1, 1, 1)
+    )
+    boxy.upload()
+    boxy.drawVertexArray()
+    glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[writeLayer])
+    boxy.clearColor()
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, boxy.tmpTexture.textureId)
+    glUseProgram(boxy.blurYShader.programId)
+    boxy.blurYShader.setUniform("srcTexture", 0)
+    boxy.blurYShader.setUniform("proj", boxy.proj)
+    boxy.blurYShader.setUniform("pixelScale", 1 / boxy.frameSize.y.float32)
+    boxy.blurYShader.setUniform("blurRadius", radius)
+    boxy.blurYShader.bindUniforms()
+    boxy.drawUvRect(
+      at = offset,
+      to = offset + boxy.frameSize.vec2,
       uvAt = vec2(0, boxy.atlasSize.float32),
       uvTo = vec2(boxy.atlasSize.float32, 0),
       tint = tint
@@ -799,216 +932,83 @@ proc popLayer*(
     boxy.upload()
     boxy.drawVertexArray()
 
-    # For debugging:
-    # boxy.tmpTexture.writeFile("resTexture.png")
-    # boxy.srcTexture.writeFile("srcTexture.png")
-    # boxy.dstTexture.writeFile("dstTexture.png")
+  proc blurEffect*(boxy: Boxy, radius: float32) =
+    ## Blurs the current layer
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "blurEffect called without pushLayer")
+    boxy.blurEffect(radius, color(1, 1, 1, 1), vec2(0, 0), boxy.layerNum, boxy.layerNum)
 
-    swap boxy.layerTextures[boxy.layerNum], boxy.tmpTexture
-    swap boxy.layerFramebuffers[boxy.layerNum], boxy.tmpFramebuffer
-
-  # Reset everything back.
-  boxy.atlasTexture = savedAtlasTexture
-  glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
-  boxy.activeShader = boxy.atlasShader
-
-proc copyLowerToCurrent*(boxy: Boxy) =
-  ## Copies the immediately lower layer texture into the current layer.
-  ## Requires that at least one lower layer exists and a current layer is active.
-  if boxy.layerNum <= 0:
-    raise newException(BoxyError, "copyLowerToCurrent requires an active layer above a lower layer")
-
-  boxy.flush()
-
-  let srcTexture = boxy.layerTextures[boxy.layerNum - 1]
-  let savedAtlasTexture = boxy.atlasTexture
-  let savedShader = boxy.activeShader
-
-  boxy.atlasTexture = srcTexture
-  boxy.activeShader = boxy.atlasShader
-
-  boxy.drawUvRect(
-    at = vec2(0, 0),
-    to = boxy.frameSize.vec2,
-    uvAt = vec2(0, boxy.atlasSize.float32),
-    uvTo = vec2(boxy.atlasSize.float32, 0),
-    tint = color(1, 1, 1, 1)
-  )
-
-  boxy.flush()
-
-  boxy.atlasTexture = savedAtlasTexture
-  boxy.activeShader = savedShader
-
-proc blurEffect(
-  boxy: Boxy,
-  radius: float32,
-  tint: Color,
-  offset: Vec2,
-  readLayer: int,
-  writeLayer: int
-) =
-  ## Blurs the current layer
-  if boxy.layerNum == -1:
-    raise newException(BoxyError, "blurEffect called without pushLayer")
-
-  boxy.flush()
-
-  # blurX
-  boxy.readyTmpTexture()
-  boxy.clearColor()
-
-  glActiveTexture(GL_TEXTURE0)
-  glBindTexture(GL_TEXTURE_2D, boxy.layerTextures[readLayer].textureId)
-
-  glUseProgram(boxy.blurXShader.programId)
-  boxy.blurXShader.setUniform("srcTexture", 0)
-  boxy.blurXShader.setUniform("proj", boxy.proj)
-  boxy.blurXShader.setUniform("pixelScale", 1 / boxy.frameSize.x.float32)
-  boxy.blurXShader.setUniform("blurRadius", radius)
-  boxy.blurXShader.bindUniforms()
-
-  boxy.drawUvRect(
-    at = vec2(0, 0),
-    to = boxy.frameSize.vec2,
-    uvAt = vec2(0, boxy.atlasSize.float32),
-    uvTo = vec2(boxy.atlasSize.float32, 0),
-    tint = color(1, 1, 1, 1)
-  )
-  boxy.upload()
-  boxy.drawVertexArray()
-
-  # blurY
-  glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[writeLayer])
-  boxy.clearColor()
-
-  glActiveTexture(GL_TEXTURE0)
-  glBindTexture(GL_TEXTURE_2D, boxy.tmpTexture.textureId)
-
-  glUseProgram(boxy.blurYShader.programId)
-  boxy.blurYShader.setUniform("srcTexture", 0)
-  boxy.blurYShader.setUniform("proj", boxy.proj)
-  boxy.blurYShader.setUniform("pixelScale", 1 / boxy.frameSize.y.float32)
-  boxy.blurYShader.setUniform("blurRadius", radius)
-  boxy.blurYShader.bindUniforms()
-
-  boxy.drawUvRect(
-    at = offset,
-    to = offset + boxy.frameSize.vec2,
-    uvAt = vec2(0, boxy.atlasSize.float32),
-    uvTo = vec2(boxy.atlasSize.float32, 0),
-    tint = tint
-  )
-  boxy.upload()
-  boxy.drawVertexArray()
-
-  # For debugging:
-  # boxy.tmpTexture.writeFile("blurX.png")
-  # texture.writeFile("blurY.png")
-
-proc blurEffect*(boxy: Boxy, radius: float32) =
-  ## Blurs the current layer
-  if boxy.layerNum == -1:
-    raise newException(BoxyError, "blurEffect called without pushLayer")
-  boxy.blurEffect(
-    radius,
-    color(1, 1, 1, 1),
-    vec2(0, 0),
-    boxy.layerNum,
-    boxy.layerNum
-  )
-
-proc dropShadowEffect*(boxy: Boxy, tint: Color, offset: Vec2, radius, spread: float32) =
-  ## Drop shadows the current layer
-  if boxy.layerNum == -1:
-    raise newException(BoxyError, "shadowLayer called without pushLayer")
-
-  boxy.pushLayer()
-
-  let
-    shadowLayerId = boxy.layerNum
-    mainLayerId = boxy.layerNum - 1
-    mainLayer = boxy.layerTextures[mainLayerId]
-
-  # spreadX
-  boxy.readyTmpTexture()
-  boxy.clearColor()
-
-  glActiveTexture(GL_TEXTURE0)
-  glBindTexture(GL_TEXTURE_2D, mainLayer.textureId)
-
-  glUseProgram(boxy.spreadXShader.programId)
-  boxy.spreadXShader.setUniform("srcTexture", 0)
-  boxy.spreadXShader.setUniform("proj", boxy.proj)
-  boxy.spreadXShader.setUniform("pixelScale", 1 / boxy.frameSize.x.float32)
-  boxy.spreadXShader.setUniform("radius", spread)
-  boxy.spreadXShader.bindUniforms()
-
-  boxy.drawUvRect(
-    at = vec2(0, 0),
-    to = boxy.frameSize.vec2,
-    uvAt = vec2(0, boxy.atlasSize.float32),
-    uvTo = vec2(boxy.atlasSize.float32, 0),
-    tint = color(1, 1, 1, 1)
-  )
-  boxy.upload()
-  boxy.drawVertexArray()
-
-  # spreadY
-  glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[shadowLayerId])
-  boxy.clearColor()
-
-  glBindTexture(GL_TEXTURE_2D, boxy.tmpTexture.textureId)
-
-  glUseProgram(boxy.spreadYShader.programId)
-  boxy.spreadYShader.setUniform("srcTexture", 0)
-  boxy.spreadYShader.setUniform("proj", boxy.proj)
-  boxy.spreadYShader.setUniform("pixelScale", 1 / boxy.frameSize.y.float32)
-  boxy.spreadYShader.setUniform("radius", spread)
-  boxy.spreadYShader.bindUniforms()
-
-  boxy.drawUvRect(
-    at = vec2(0, 0) + offset,
-    to = boxy.frameSize.vec2 + offset,
-    uvAt = vec2(0, boxy.atlasSize.float32),
-    uvTo = vec2(boxy.atlasSize.float32, 0),
-    tint = color(1, 1, 1, 1)
-  )
-  boxy.upload()
-  boxy.drawVertexArray()
-
-  boxy.blurEffect(radius, tint, offset, shadowLayerId, shadowLayerId)
-
-  swap(boxy.layerTextures[shadowLayerId], boxy.layerTextures[mainLayerId])
-  swap(boxy.layerFramebuffers[shadowLayerId], boxy.layerFramebuffers[mainLayerId])
-  boxy.popLayer()
-
-  # For debugging:
-  # boxy.tmpTexture.writeFile("spreadX.png")
-  # mainLayer.writeFile("spreadY.png")
+  proc dropShadowEffect*(boxy: Boxy, tint: Color, offset: Vec2, radius, spread: float32) =
+    ## Drop shadows the current layer
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "shadowLayer called without pushLayer")
+    boxy.pushLayer()
+    let
+      shadowLayerId = boxy.layerNum
+      mainLayerId = boxy.layerNum - 1
+      mainLayer = boxy.layerTextures[mainLayerId]
+    boxy.readyTmpTexture()
+    boxy.clearColor()
+    glActiveTexture(GL_TEXTURE0)
+    glBindTexture(GL_TEXTURE_2D, mainLayer.textureId)
+    glUseProgram(boxy.spreadXShader.programId)
+    boxy.spreadXShader.setUniform("srcTexture", 0)
+    boxy.spreadXShader.setUniform("proj", boxy.proj)
+    boxy.spreadXShader.setUniform("pixelScale", 1 / boxy.frameSize.x.float32)
+    boxy.spreadXShader.setUniform("radius", spread)
+    boxy.spreadXShader.bindUniforms()
+    boxy.drawUvRect(
+      at = vec2(0, 0),
+      to = boxy.frameSize.vec2,
+      uvAt = vec2(0, boxy.atlasSize.float32),
+      uvTo = vec2(boxy.atlasSize.float32, 0),
+      tint = color(1, 1, 1, 1)
+    )
+    boxy.upload()
+    boxy.drawVertexArray()
+    glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[shadowLayerId])
+    boxy.clearColor()
+    glBindTexture(GL_TEXTURE_2D, boxy.tmpTexture.textureId)
+    glUseProgram(boxy.spreadYShader.programId)
+    boxy.spreadYShader.setUniform("srcTexture", 0)
+    boxy.spreadYShader.setUniform("proj", boxy.proj)
+    boxy.spreadYShader.setUniform("pixelScale", 1 / boxy.frameSize.y.float32)
+    boxy.spreadYShader.setUniform("radius", spread)
+    boxy.spreadYShader.bindUniforms()
+    boxy.drawUvRect(
+      at = vec2(0, 0) + offset,
+      to = boxy.frameSize.vec2 + offset,
+      uvAt = vec2(0, boxy.atlasSize.float32),
+      uvTo = vec2(boxy.atlasSize.float32, 0),
+      tint = color(1, 1, 1, 1)
+    )
+    boxy.upload()
+    boxy.drawVertexArray()
+    boxy.blurEffect(radius, tint, offset, shadowLayerId, shadowLayerId)
+    swap(boxy.layerTextures[shadowLayerId], boxy.layerTextures[mainLayerId])
+    swap(boxy.layerFramebuffers[shadowLayerId], boxy.layerFramebuffers[mainLayerId])
+    boxy.popLayer()
 
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
   ## Starts a new frame.
   if boxy.frameBegun:
     raise newException(BoxyError, "beginFrame has already been called")
 
-  # Resize all of the layers if needed.
   if boxy.frameSize != frameSize:
     boxy.frameSize = frameSize
-    for texture in boxy.layerTextures:
-      texture.width = frameSize.x
-      texture.height = frameSize.y
-      bindTextureData(texture, nil)
-      #glBindFramebuffer(GL_FRAMEBUFFER, boxy.layerFramebuffers[boxy.layerNum])
-      #checkFramebuffer()
+    when not defined(ds3):
+      for texture in boxy.layerTextures:
+        texture.width = frameSize.x
+        texture.height = frameSize.y
+        bindTextureData(texture, nil)
 
   boxy.frameBegun = true
   boxy.proj = proj
 
-  glViewport(0, 0, boxy.frameSize.x, boxy.frameSize.y)
-
-  if clearFrame:
-    boxy.clearColor()
+  when not defined(ds3):
+    glViewport(0, 0, boxy.frameSize.x, boxy.frameSize.y)
+    if clearFrame:
+      boxy.clearColor()
 
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, clearFrame = true) {.inline.} =
   beginFrame(
@@ -1193,18 +1193,19 @@ proc drawImage*(
   boxy.drawImage(key, pos = vec2(0, 0), tint)
   boxy.restoreTransform()
 
-proc getImage*(boxy: Boxy, bounds: Rect): Image =
-  ## Gets an Image rectangle from the current layer.
-  ## Note: This is very costly because it transfers GPU data to CPU.
-  ## It's not recommended to use this in a game loop.
-  if boxy.layerNum == -1:
-    raise newException(BoxyError, "getImage called without pushLayer")
-  let layerTexture = boxy.layerTextures[boxy.layerNum]
-  let fullLayer = layerTexture.readImage()
-  fullLayer.flipVertical()
-  return fullLayer.subImage(
-    bounds.x.int,
-    bounds.y.int,
-    bounds.w.int,
-    bounds.h.int
-  )
+when not defined(ds3):
+  proc getImage*(boxy: Boxy, bounds: Rect): Image =
+    ## Gets an Image rectangle from the current layer.
+    ## Note: This is very costly because it transfers GPU data to CPU.
+    ## It's not recommended to use this in a game loop.
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "getImage called without pushLayer")
+    let layerTexture = boxy.layerTextures[boxy.layerNum]
+    let fullLayer = layerTexture.readImage()
+    fullLayer.flipVertical()
+    return fullLayer.subImage(
+      bounds.x.int,
+      bounds.y.int,
+      bounds.w.int,
+      bounds.h.int
+    )
