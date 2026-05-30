@@ -253,9 +253,14 @@ block:
 # ---------------------------------------------------------------------------
 # Part 6: topScreenOrthoProj — OrthoTilt matrix for PICA200 top screen
 #
-# Function must reproduce the exact {w,z,y,x} row values that milestone3_3ds
-# hardcodes for a 400×240 logical screen, and satisfy the coordinate mappings
-# documented in the function's comment block.
+# Verifies the X, Y, and W rows match the values milestone3_3ds previously
+# hardcoded (-1/120 and -1/200 coefficients, w-translations = 1).
+#
+# The depth row (row 2) intentionally differs from the old milestone3 matrix:
+#   Old (milestone3 hardcode): [-1, 2, 0, 0]  → clip_z = 2z - 1  (NDC remap)
+#   New (this function):       [0, -1/1000, 0, 0] → clip_z = -z/1000 (boxy convention)
+# This is correct for the current use (z=0 vertices, depth test disabled). See
+# the function docstring for the depth-convention constraint on nonzero-z callers.
 #
 # PICA200 C3D_Mtx flat layout: result[i*4+0..3] = {w,z,y,x} for row i.
 # Row i dot-products with vertex (vx,vy,vz,vw=1):
@@ -310,8 +315,29 @@ block:
   assertMsg(abs(tlx - 1f) < 1e-6f, "top-left(0,0) → clip_x=1")
   assertMsg(abs(tly - 1f) < 1e-6f, "top-left(0,0) → clip_y=1")
 
-  # --- Matches milestone3_3ds rows 0, 1, 3 exactly ---
+  # --- X/Y rows match milestone3_3ds rows 0 and 1 exactly ---
+  # (Row 2 intentionally differs — see Part 6 header for the depth-convention note.)
   assertMsg(abs(m[2] - (-1f / 120f)) < 1e-7f, "row0 y matches milestone3 -1/120")
   assertMsg(abs(m[7] - (-1f / 200f)) < 1e-7f, "row1 x matches milestone3 -1/200")
+
+# Part 6b: non-standard dimensions — guards against W/H swap that the
+# symmetric 400×240 centre-maps-to-zero check cannot detect.
+block:
+  # 320×240 (3DS bottom screen logical dimensions).
+  let m2 = topScreenOrthoProj(320f, 240f)
+  # Row 0: y-coefficient = -2/H = -2/240 = -1/120 (same H as top screen)
+  assertMsg(abs(m2[2] - (-2f / 240f)) < 1e-7f,
+    "320x240 row0 y=-2/240 (H=240, same scale as 400x240)")
+  # Row 1: x-coefficient = -2/W = -2/320 = -1/160 (different from 400x240 case)
+  assertMsg(abs(m2[7] - (-2f / 320f)) < 1e-7f,
+    "320x240 row1 x=-2/320 (W=320, distinct from -1/200 top-screen)")
+  # Different W → different row1 coefficient — proves W and H are not swapped.
+  assertMsg(abs(m2[7] - (-2f / 400f)) > 1e-5f,
+    "320x240 row1 x-coeff differs from 400-wide value (not swapped)")
+  # Centre of 320×240: (160, 120) → clip (0, 0)
+  let cx2 = m2[3]*160f + m2[2]*120f + m2[1]*0f + m2[0]
+  let cy2 = m2[7]*160f + m2[6]*120f + m2[5]*0f + m2[4]
+  assertMsg(abs(cx2) < 1e-6f, "320x240 centre(160,120) → clip_x=0")
+  assertMsg(abs(cy2) < 1e-6f, "320x240 centre(160,120) → clip_y=0")
 
 echo "ALL TESTS PASSED"

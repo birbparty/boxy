@@ -41,9 +41,11 @@ const shbinRaw = staticRead("../build/render2d.shbin")
 const DISPLAY_FLAGS = 0x1000'u32
 
 # OrthoTilt projection for 400×240 Y-down logical space, sourced from
-# citro3d_backend.topScreenOrthoProj so there is a single source of truth.
+# citro3d_backend.topScreenOrthoProj — the single canonical definition for
+# the top-screen rotated projection (the compositing and identity matrices in
+# the backend are separate, non-rotated projections with different purposes).
 # See that function for the full derivation and PICA200 layout details.
-var projMat = topScreenOrthoProj(400f, 240f)
+let projMat = topScreenOrthoProj(400f, 240f)
 
 # Vertex layout matching render2d.v.pica:
 #   v0 = position (x, y)      GPU_FLOAT × 2

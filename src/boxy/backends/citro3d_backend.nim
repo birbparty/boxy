@@ -126,10 +126,18 @@ func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
   ## onto the 3DS top screen (physically 240×400, rotated):
   ##   clip_x = -(2/logicalH) · y + 1
   ##   clip_y = -(2/logicalW) · x + 1
-  ##   clip_z = -z / 1000
+  ##   clip_z = -z / 1000   (boxy near/far convention: near=-1000, far=1000)
+  ##
+  ## Depth row convention: row 2 uses clip_z = -z/1000 (zero bias), matching
+  ## the compositing matrix in compositeLayer. This is valid for z=0 geometry
+  ## and depth-test-disabled rendering (the current 2D use). If depth testing
+  ## is enabled or nonzero-z is used, a caller must supply a biased depth row
+  ## matching the PICA200 NDC range [0, -1] (near→0, far→-1).
   ##
   ## For the standard 400×240 top screen: `topScreenOrthoProj(400f, 240f)`.
   ## Sanity check: logical centre (W/2, H/2) maps to clip (0, 0).
+  assert logicalW > 0f and logicalH > 0f,
+    "topScreenOrthoProj: logicalW and logicalH must be positive"
   let scaleY = 2f / logicalH  # coefficient on y → clip_x
   let scaleX = 2f / logicalW  # coefficient on x → clip_y
   # Rows in {w, z, y, x} order:
