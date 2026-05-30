@@ -2,11 +2,17 @@ import std/[os, osproc, strutils]
 
 const ignore = [
   # Needs extra dependencies to be installed.
-  "basic_glfw.nim", 
+  "basic_glfw.nim",
   "basic_sdl2.nim",
   "basic_glut.nim",
   # TODO: Needs to be fixed.
-  "layer_as_image.nim"
+  "layer_as_image.nim",
+  # Require --define:ds3 (devkitARM cross-compilation); use scripts/build_3ds.sh.
+  "blank_3ds.nim",
+  "atlas_compile_3ds.nim",
+  "milestone2_3ds.nim",
+  "milestone3_3ds.nim",
+  "milestone4_3ds.nim",
 ]
 
 # Scan for files.
