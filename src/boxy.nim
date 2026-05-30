@@ -9,10 +9,15 @@ when not defined(ds3):
   import boxy/backends/opengl_backend
   export atlasVert, atlasMain, maskMain
   export pixie
+else:
+  # Seam import: not yet called in boxy.nim body — becomes load-bearing in boxy-25q.
+  # Do not remove: this import wires Citro3dBackend into the ds3 compilation unit.
+  import boxy/backends/citro3d_backend
+
 # NOTE: --define:ds3 does not yet compile boxy.nim fully. The ds3 seam is
 # partial — proc bodies and transitive submodule imports (blends, textures,
 # shaders, buffers) still reference opengl/shady/pixie. Per-module wiring
-# is tracked in boxy-91w, boxy-25q, boxy-4rj, boxy-duv, boxy-0vh, boxy-8o9.
+# is tracked in boxy-25q, boxy-4rj, boxy-duv, boxy-0vh, boxy-8o9.
 
 const
   QuadLimit = 10_921 # 6 indices per quad, ensure indices stay in uint16 range
@@ -360,12 +365,13 @@ proc newBoxy*(
 when defined(ds3):
   proc enterRawOpenGLMode*(boxy: Boxy) =
     ## Not supported on Nintendo 3DS — use citro3d APIs directly.
-    discard
+    ## Note: stderr may be invisible on retail hardware without consoleInit/3dslink.
+    stderr.writeLine("boxy: enterRawOpenGLMode is not supported on Nintendo 3DS")
 
   proc exitRawOpenGLMode*(boxy: Boxy) =
-    ## No-op on Nintendo 3DS. Backend state restore will be wired in a
-    ## future adoption task via backend.restoreState(snapshot).
-    discard
+    ## No-op on Nintendo 3DS — there is no raw-GL mode to exit.
+    ## Note: stderr may be invisible on retail hardware without consoleInit/3dslink.
+    stderr.writeLine("boxy: exitRawOpenGLMode is a no-op on Nintendo 3DS")
 else:
   proc enterRawOpenGLMode*(boxy: Boxy) =
     ## Used to run other OpenGL code while using boxy.
