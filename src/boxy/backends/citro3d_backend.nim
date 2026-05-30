@@ -441,12 +441,14 @@ when defined(ds3):
 
     # Bind blit shader; upload identity projection (vertices are pre-computed in
     # clip space, so no coordinate transform is needed).
+    # PICA200 LAYOUT: C3D_FVec stores {w,z,y,x} in memory, so each flat row is
+    # [w,z,y,x]. Identity rows (x,y,z,w)=(1,0,0,0),(0,1,0,0)... → anti-diagonal.
     c3dBindProgram(addr b.shaderProg)
     var identMat = [
-      1f, 0f, 0f, 0f,
-      0f, 1f, 0f, 0f,
+      0f, 0f, 0f, 1f,
       0f, 0f, 1f, 0f,
-      0f, 0f, 0f, 1f]
+      0f, 1f, 0f, 0f,
+      1f, 0f, 0f, 0f]
     c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
                      cast[ptr C3D_Mtx](addr identMat[0]))
 
