@@ -8,7 +8,9 @@
 ##   - Citro3dBackend: Backend subtype implementing atlas texture management
 ##
 ## The swizzle, projection, and blend-category utilities have no citro3d
-## dependency and compile on any platform. Citro3dBackend requires --define:ds3.
+## dependency and compile on any platform (host-testable), but they do require
+## `pixie` to be installed since `BlendMode` is a pixie type.
+## Citro3dBackend requires --define:ds3.
 ##
 ## Morton convention (verified against devkitPro/tex3ds source/swizzle.cpp):
 ##   x bits occupy even positions, y bits odd positions.
@@ -129,23 +131,25 @@ type
     ##
     ## Defined outside `when defined(ds3)` so it can be unit-tested on the host.
     bcNormal     ## Standard premultiplied-alpha over: GPU_ONE / GPU_ONE_MINUS_SRC_ALPHA
-    bcMultiply   ## Approximated multiply via GPU_DST_COLOR src factor (degraded; no dst readback)
+    bcMultiply   ## Approximated multiply via GPU_DST_COLOR src factor (degraded; see compositeLayer)
     bcScreen     ## Screen: GPU_ONE / GPU_ONE_MINUS_SRC_COLOR
     bcMask       ## Mask: GPU_ZERO / GPU_SRC_COLOR (maskShader lost; degraded on PICA200)
+    bcOverwrite  ## Exact overwrite: GPU_ONE / GPU_ZERO (copies src, ignores dst)
     bcUnsupported ## No fixed-function equivalent; falls back to bcNormal with a one-time warning
 
 func blendCategory*(m: BlendMode): Pica200BlendCategory =
   ## Maps a pixie `BlendMode` to its PICA200 fixed-function approximation category.
   ##
-  ## NormalBlend and ScreenBlend map exactly. MultiplyBlend and MaskBlend are
-  ## degraded approximations (no programmable fragment shader on PICA200). All
-  ## other modes return bcUnsupported and the caller should warn once and fall
-  ## back to NormalBlend.
+  ## NormalBlend and ScreenBlend map exactly. OverwriteBlend maps exactly via
+  ## GPU_ONE/GPU_ZERO. MultiplyBlend and MaskBlend are degraded approximations
+  ## (no programmable fragment shader on PICA200). All other modes return
+  ## bcUnsupported and the caller should warn once and fall back to NormalBlend.
   case m
   of NormalBlend: bcNormal
   of MultiplyBlend: bcMultiply
   of ScreenBlend: bcScreen
   of MaskBlend: bcMask
+  of OverwriteBlend: bcOverwrite
   else: bcUnsupported
 
 func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
@@ -882,13 +886,6 @@ when defined(ds3):
       raise newException(BackendError,
         "compositeLayer: screen render target not yet wired in the ds3 backend")
 
-    let bcat = blendCategory(blendMode)
-    if bcat == bcUnsupported and blendMode notin b.warnedBlendModes:
-      b.warnedBlendModes.incl(blendMode)
-      stderr.writeLine(
-        "citro3d compositeLayer: blend mode " & $blendMode &
-        " has no PICA200 fixed-function equivalent — falling back to NormalBlend")
-
     if frameSize.x <= 0 or frameSize.y <= 0:
       raise newException(BackendError, "compositeLayer: non-positive frameSize")
 
@@ -908,6 +905,18 @@ when defined(ds3):
     if dstTexture.id != 0 and dstTexture.id == src.id:
       raise newException(BackendError,
         "compositeLayer: src and dst alias the same surface (read-after-write hazard)")
+
+    # Warn once per session for blend modes with no fixed-function equivalent.
+    # Placed after all validation so the warning is only emitted when a draw
+    # will actually happen (not on calls that are about to raise on bad inputs).
+    # Note: on retail 3DS without consoleInit/3dslink, stderr may not be visible;
+    # the authoritative record of degraded-mode semantics is the docstring above.
+    let bcat = blendCategory(blendMode)
+    if bcat == bcUnsupported and blendMode notin b.warnedBlendModes:
+      b.warnedBlendModes.incl(blendMode)
+      stderr.writeLine(
+        "citro3d compositeLayer: blend mode " & $blendMode &
+        " has no PICA200 fixed-function equivalent — falling back to NormalBlend")
 
     if not b.shaderReady:
       b.initBlitShader()
@@ -952,15 +961,26 @@ when defined(ds3):
                     GPU_ONE, GPU_ONE_MINUS_SRC_COLOR,
                     GPU_ONE, GPU_ONE_MINUS_SRC_COLOR)
     of bcMultiply:
-      # DEGRADED APPROXIMATION: true multiply requires sampling the destination texture.
-      # PICA200 fixed-function has no dst-readback in the TEV pipeline. Using
-      # GPU_DST_COLOR as the source blend factor approximates dst*src at the blend
-      # stage, but TEV still modulates src by vertex-color (tint) before blending, so
-      # the result diverges from the desktop GL blendShader path for colored content.
+      # DEGRADED APPROXIMATION: true per-pixel multiply would need dst available in the
+      # TEV/fragment stage, which PICA200 fixed-function lacks. We instead exploit the
+      # blend unit's dst access: GPU_DST_COLOR as the src factor yields src·dst at the
+      # blend stage. For opaque premultiplied src (src_a=1) this is exact: out=src·dst.
+      # For translucent or colored-tint content the blend unit only sees post-TEV src
+      # (already modulated by vertex-color tint), so output diverges from the desktop GL
+      # blendShader path; the result is src·dst + dst·(1−src_a) rather than a true per-
+      # pixel multiply.
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_DST_COLOR, GPU_ONE_MINUS_SRC_ALPHA,
                     GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
-    else: # bcNormal or bcUnsupported (bcUnsupported warned above, falls back to Normal)
+    of bcOverwrite:
+      # Exact: copies source pixels, discarding destination entirely.
+      # GPU_ONE × src + GPU_ZERO × dst = src. Matches OverwriteBlend semantics perfectly.
+      c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                    GPU_ONE, GPU_ZERO,
+                    GPU_ONE, GPU_ZERO)
+    else: # bcNormal or bcUnsupported (bcUnsupported warned above; both arms provably exhausted)
+          # Enum arms above: bcMask, bcScreen, bcMultiply, bcOverwrite — leaving only
+          # bcNormal and bcUnsupported, both of which use the premultiplied-alpha Normal path.
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
                     GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
