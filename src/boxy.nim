@@ -49,6 +49,9 @@ type
       layerTextures: seq[Texture]      ## Layers array for pushing and popping.
       layerFramebuffers: seq[GLuint]   ## Attachment targets for layer textures.
     else:
+      # layerRTs: not yet populated — pushLayer/popLayer on ds3 is unimplemented.
+      # Declared as a placeholder; layerNum stays -1 on ds3 so endFrame's
+      # `layerNum != -1` guard is always satisfied without touching this seq.
       layerRTs: seq[tuple[tex: TextureHandle, rt: RenderTargetHandle]]
     atlasSize: int                   ## Size x size dimensions of the atlas.
     quadCount: int                   ## Number of quads drawn so far in this batch.
@@ -542,6 +545,11 @@ when not defined(ds3):
 else:
   proc grow(boxy: Boxy) =
     ## Grows the atlas on ds3 using the citro3d backend blit.
+    ## Must be called outside an open C3D frame: blitAtlasToNewAtlas opens its
+    ## own C3D_FRAME_SYNCDRAW mini-frame, which fails if a frame is already open.
+    ## The flush here ensures any pending quad batch is submitted before the old
+    ## atlas handle is invalidated — matching the non-ds3 grow path.
+    boxy.flush()
     let oldAtlasSize = boxy.atlasSize
     let newAtlasSize = oldAtlasSize * 2
     let oldTileRun = boxy.tileRun
@@ -576,6 +584,11 @@ proc takeFreeTile(boxy: Boxy): int =
   boxy.takeFreeTile()
 
 proc addImage*(boxy: Boxy, key: string, image: Image, mipmaps: bool = true) =
+  when defined(ds3):
+    if boxy.frameBegun:
+      raise newException(BoxyError,
+        "addImage must be called outside a beginFrame/endFrame pair on ds3: " &
+        "atlas grow triggers c3dFrameBegin which cannot nest inside an open frame")
   if key in boxy.entriesBuffered:
     raise newException(
       BoxyError,
@@ -634,6 +647,9 @@ proc addImage*(boxy: Boxy, key: string, image: Image, mipmaps: bool = true) =
       if not mipmaps:
         break
 
+      when defined(ds3):
+        break  # PICA200 atlas is single-level; uploadTile no-ops for level > 0
+
       if img.width <= 1 or img.height <= 1:
         break
 
@@ -648,6 +664,9 @@ proc checkBatch(boxy: Boxy) {.inline.} =
   when not defined(ds3):
     if boxy.quadCount == boxy.quadsPerBatch:
       boxy.flush()
+  # ds3: no mid-frame flush — single-batch-per-frame constraint.
+  # addQuad raises BackendError if quadLimit is exceeded; callers must
+  # not draw more than quadLimit quads per frame on this backend.
 
 when not defined(ds3):
   proc setVert(buf: var seq[float32], i: int, v: Vec2) =
@@ -735,7 +754,10 @@ else:
         vec2(uvAtN.x, uvAtN.y),
       ]
       tints = [tint, tint, tint, tint]
-    Citro3dBackend(boxy.backend).addQuad(posQuad, uvQuad, tints)
+    # Downcast is safe: on ds3, newBoxy always assigns a Citro3dBackend.
+    # addQuad is not in the Backend vtable (PICA200-specific API).
+    let c3d = Citro3dBackend(boxy.backend)
+    c3d.addQuad(posQuad, uvQuad, tints)
     inc boxy.quadCount
 
   proc addWhiteTile(boxy: Boxy) =
@@ -991,6 +1013,9 @@ when not defined(ds3):
 
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
   ## Starts a new frame.
+  ## On ds3, `clearFrame` is not honored — the app owns the frame lifecycle
+  ## (c3dFrameBegin/c3dFrameEnd) and is responsible for clearing render targets.
+  ## On ds3, addImage must be called before beginFrame (not inside a frame pair).
   if boxy.frameBegun:
     raise newException(BoxyError, "beginFrame has already been called")
 
