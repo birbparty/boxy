@@ -343,6 +343,17 @@ proc c3dAlphaBlend*(colorEq: GpuBlendEquation, alphaEq: GpuBlendEquation,
 proc c3dDepthTest*(enable: bool, function: int32, writemask: int32)
   {.importc: "C3D_DepthTest", header: "citro3d.h".}
 
+# GPU_CULLMODE — enums.h
+type GpuCullMode* = distinct int32
+
+const
+  GPU_CULL_NONE*      = GpuCullMode(0)
+  GPU_CULL_FRONT_CCW* = GpuCullMode(1)
+  GPU_CULL_BACK_CCW*  = GpuCullMode(2)
+
+proc c3dCullFace*(mode: GpuCullMode)
+  {.importc: "C3D_CullFace", header: "citro3d.h".}
+
 # ---------------------------------------------------------------------------
 # Attribute and buffer info
 # ---------------------------------------------------------------------------
