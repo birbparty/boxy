@@ -787,6 +787,87 @@ when defined(ds3):
                     C3D_UNSIGNED_SHORT, b.quadIdxBuf)
     b.quadCount = 0
 
+  proc prepareAtlasDraw*(b: Citro3dBackend, atlasHandle: TextureHandle,
+                         frameSize: IVec2) =
+    ## Set up PICA200 GPU state for the atlas draw path (drawImage / drawRect).
+    ##
+    ## PRECONDITIONS:
+    ##   1. quadCount > 0 — call only when there are quads to draw (boxy.nim flush
+    ##      enforces this; direct callers must check before invoking).
+    ##   2. Must be called inside an open C3D frame (after c3dFrameBegin and
+    ##      c3dFrameDrawOn) and before flush().
+    ##   3. The currently-bound render target MUST be the physical 3DS top screen.
+    ##      topScreenOrthoProj is hardwired here; it is wrong for the bottom
+    ##      screen and RTT targets (compositeLayer uses a non-tilted ortho for
+    ##      that reason). Renders to non-top-screen targets must supply their own
+    ##      projection and call the backend draw path directly.
+    ##
+    ## Pipeline state set:
+    ##   - shader:     render2d.shbin (lazy-initialised on first call)
+    ##   - projection: topScreenOrthoProj(frameSize) — 90° CCW tilt for the
+    ##                 physical top screen; beginFrame's proj argument is ignored
+    ##                 on ds3 for atlas draws
+    ##   - depth:      off (2D rendering only)
+    ##   - blend:      premultiplied-alpha NormalBlend
+    ##   - TEV:        MODULATE = texture0 × primary_color (for per-vertex tinting)
+    ##                 Single stage; compositeLayer uses the same config for its
+    ##                 NormalBlend arm.
+    ##   - cull:       not set — inherits the PICA200 default cull state.
+    ##                 Atlas quads are wound to be front-facing under that default
+    ##                 (see index-buffer construction at initQuadBufs). Any code
+    ##                 between c3dFrameDrawOn and this proc that changes cull mode
+    ##                 will silently break atlas draws.
+    ##   - atlas tex:  atlasHandle bound to unit 0
+    ##
+    ## Single-flush-per-frame coupling: this proc is invoked once per frame,
+    ## immediately before the single draw submit, because the backend forbids
+    ## more than one flush() per frame (linearAlloc vertex buffer, queuable
+    ## C3D_DrawElements). If a ring-buffer change ever lifts that constraint, the
+    ## per-flush state-setup story must be revisited.
+    ##
+    ## Caller pattern (in boxy.nim ds3 flush):
+    ##   b.prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
+    ##   b.flush()
+    if not b.shaderReady:
+      b.initBlitShader()
+
+    # Bind render2d shader (same binary used by blitAtlasToNewAtlas).
+    c3dBindProgram(addr b.shaderProg)
+
+    # Upload tilted ortho projection for the PICA200 physical top screen.
+    # topScreenOrthoProj composes ortho(0,W,H,0) with a 90° CCW rotation so
+    # the logical frame (0,0)→(W,H) maps to the rotated physical display.
+    # compositeLayer uses a non-tilted ortho because it targets an RTT texture.
+    var proj = topScreenOrthoProj(frameSize.x.float32, frameSize.y.float32)
+    c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                     cast[ptr C3D_Mtx](addr proj[0]))
+
+    # Depth test off — boxy's draw path is purely 2D.
+    c3dDepthTest(false, 0, 0)
+
+    # Premultiplied-alpha NormalBlend (GPU_ONE × src + GPU_ONE_MINUS_SRC_ALPHA × dst).
+    c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                  GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
+                  GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
+
+    # TEV stage 0: MODULATE = texture0 × primary_color (vertex tint).
+    # Matches compositeLayer's TEV for the NormalBlend path.
+    let env = c3dGetTexEnv(0)
+    c3dTexEnvInit(env)
+    c3dTexEnvSrc(env, C3D_BOTH_MODE, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0)
+    c3dTexEnvFunc(env, C3D_BOTH_MODE, GPU_MODULATE)
+    c3dDirtyTexEnv(env)
+
+    # Bind the atlas texture to unit 0.
+    let si = b.slotIndex(atlasHandle)
+    if si >= 0:
+      c3dTexBind(0, addr b.texSlots[si].tex)
+    else:
+      raise newException(BackendError,
+        "prepareAtlasDraw: invalid atlasHandle (id=" & $atlasHandle.id &
+        ") — handle not allocated or already freed; check that newBoxy succeeded " &
+        "and destroy() has not been called")
+
   # ---------------------------------------------------------------------------
   # nextPOT — smallest power-of-two ≥ n
   # ---------------------------------------------------------------------------

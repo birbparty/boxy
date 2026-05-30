@@ -189,8 +189,19 @@ when not defined(ds3):
 else:
   proc flush(boxy: Boxy) =
     ## Submit current quad batch via the citro3d backend.
-    ## Precondition: called inside an open C3D frame owned by the caller.
+    ## Precondition: called inside an open C3D frame (c3dFrameBegin..c3dFrameEnd)
+    ## with the render target already bound (c3dFrameDrawOn called by the app).
     boxy.entriesBuffered.clear()
+    if boxy.quadCount > 0:
+      # Set up PICA200 GPU state before submitting: shader, projection, TEV,
+      # atlas bind, blend. Uses downcast — safe: ds3 newBoxy always assigns
+      # Citro3dBackend, and prepareAtlasDraw is not in the Backend vtable.
+      #
+      # PRECONDITION (projection contract): the app MUST have bound the physical
+      # top screen via c3dFrameDrawOn before this flush.  prepareAtlasDraw always
+      # uploads the 90°-tilted top-screen projection; it produces wrong output for
+      # the bottom screen or RTT targets.  See prepareAtlasDraw docstring.
+      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
     boxy.backend.flush()
     boxy.quadCount = 0
 
@@ -1017,6 +1028,9 @@ proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
   ## Starts a new frame.
   ## On ds3, `clearFrame` is not honored — the app owns the frame lifecycle
   ## (c3dFrameBegin/c3dFrameEnd) and is responsible for clearing render targets.
+  ## On ds3, the `proj` argument is also not honored for atlas draws (drawImage/
+  ## drawRect): prepareAtlasDraw recomputes topScreenOrthoProj from frameSize
+  ## each frame, ignoring any custom matrix supplied here.
   ## On ds3, addImage must be called before beginFrame (not inside a frame pair).
   if boxy.frameBegun:
     raise newException(BoxyError, "beginFrame has already been called")
