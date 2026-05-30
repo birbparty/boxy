@@ -40,17 +40,23 @@ const shbinRaw = staticRead("../build/render2d.shbin")
 # GX_TRANSFER_IN_FORMAT(RGBA8=0)=0 | GX_TRANSFER_OUT_FORMAT(RGB8=1)=0x1000
 const DISPLAY_FLAGS = 0x1000'u32
 
-# OrthoTilt projection (row-major PICA200 fvec format, 4×4 flattened).
-# Maps 400×240 Y-down logical space to PICA200 clip space via 90° tilt.
-# Row 0: clip X = -logical_y / 120 + 1
-# Row 1: clip Y = -logical_x / 200 + 1
-# Row 2: z (constant for 2D; shader forces r1.z=0 → z_clip = -1 = near plane)
-# Row 3: w = 1
+# OrthoTilt projection for 400×240 Y-down logical space.
+# clip X = -logical_y / 120 + 1
+# clip Y = -logical_x / 200 + 1
+#
+# PICA200 LAYOUT: C3D_FVec stores components in {w,z,y,x} memory order, so each
+# row of the flat array must be written as [w, z, y, x], NOT [x, y, z, w].
+# FVec4_New(x,y,z,w) → {w,z,y,x} in memory (confirmed: types.h C3D_FVec union).
+# Intended rows in (x,y,z,w) terms and their [w,z,y,x] flat encoding:
+#   Row 0: (0, -1/120,  0,  1) → [1,  0,   -1/120,  0      ]
+#   Row 1: (-1/200, 0,  0,  1) → [1,  0,    0,      -1/200  ]
+#   Row 2: (0,  0,  2, -1)     → [-1, 2,    0,       0      ]
+#   Row 3: (0,  0,  0,  1)     → [1,  0,    0,       0      ]
 var projMat: array[16, float32] = [
-  0f,          -1f / 120f, 0f,  1f,
-  -1f / 200f,   0f,        0f,  1f,
-  0f,           0f,        2f, -1f,
-  0f,           0f,        0f,  1f,
+  1f,          0f,          -1f / 120f,   0f,
+  1f,          0f,           0f,          -1f / 200f,
+  -1f,         2f,           0f,           0f,
+  1f,          0f,           0f,           0f,
 ]
 
 # Vertex layout matching render2d.v.pica:
