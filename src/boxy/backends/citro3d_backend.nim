@@ -458,7 +458,8 @@ when defined(ds3):
     if b.dvlb != nil:
       discard shaderProgramFree(addr b.shaderProg)
       dvlbFree(b.dvlb); b.dvlb = nil
-    b.projReg = -1  # no field should outlive the resources it describes
+    b.projReg = -1      # no field should outlive the resources it describes
+    b.shaderReady = false  # guard: blitAtlasToNewAtlas checks this before re-using freed bufs
 
   # ---------------------------------------------------------------------------
   # initBlitShader — lazy one-time setup for blitAtlasToNewAtlas
@@ -1150,6 +1151,10 @@ when defined(ds3):
     ##   1. freeShaderState: blit prog+dvlb, blitVtxBuf, blitIdxBuf
     ##   2. quad buffers: quadVtxBuf, quadIdxBuf
     ##   3. slot teardown: texSlots (VRAM tex + mirror) and rtSlots (RT)
+    ##
+    ## Calling any other backend method after destroy is undefined behavior.
+    ## freeShaderState resets shaderReady=false so blitAtlasToNewAtlas cannot
+    ## re-enter freed buffers, but this is a safety net, not a license to reuse.
     ##
     ## Call site: not yet wired — boxy.nim does not compile on ds3 (Boxy type
     ## split is tracked in boxy-1gd). This method is provided so the call can
