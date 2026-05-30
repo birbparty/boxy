@@ -15,7 +15,7 @@
 ## Typical exit-key pattern:
 ##   while aptMainLoop():
 ##     hidScanInput()
-##     if (hidKeysDown(0) and KEY_START) != 0:
+##     if (hidKeysDown() and KEY_START) != 0:
 ##       break
 
 when not defined(ds3):
@@ -41,28 +41,28 @@ const
   KEY_L*      = 0x00000200'u32  ## L shoulder button
   KEY_X*      = 0x00000400'u32  ## X button
   KEY_Y*      = 0x00000800'u32  ## Y button
-  KEY_ZL*     = 0x00002000'u32  ## ZL (New 3DS only)
-  KEY_ZR*     = 0x00004000'u32  ## ZR (New 3DS only)
+  KEY_ZL*     = 0x00004000'u32  ## ZL (New 3DS only) — BIT(14)
+  KEY_ZR*     = 0x00008000'u32  ## ZR (New 3DS only) — BIT(15)
 
 # ---------------------------------------------------------------------------
 # HID polling functions (from <3ds/services/hid.h>)
 #
 # Call hidScanInput() once per frame (before any hidKeysDown/Held/Up query).
-# id parameter is the controller id (0 for the 3DS built-in controls).
+# hidKeysDown/Held/Up take no arguments — the C API is `u32 hidKeysDown(void)`.
 # ---------------------------------------------------------------------------
 
 proc hidScanInput*()
   {.importc: "hidScanInput", header: "<3ds/services/hid.h>".}
   ## Scan the HID hardware state. Must be called once per frame.
 
-proc hidKeysDown*(id: uint32): uint32
+proc hidKeysDown*(): uint32
   {.importc: "hidKeysDown", header: "<3ds/services/hid.h>".}
   ## Returns bitmask of keys just pressed this frame (rising edge).
 
-proc hidKeysHeld*(id: uint32): uint32
+proc hidKeysHeld*(): uint32
   {.importc: "hidKeysHeld", header: "<3ds/services/hid.h>".}
   ## Returns bitmask of keys currently held (any duration).
 
-proc hidKeysUp*(id: uint32): uint32
+proc hidKeysUp*(): uint32
   {.importc: "hidKeysUp", header: "<3ds/services/hid.h>".}
   ## Returns bitmask of keys just released this frame (falling edge).
