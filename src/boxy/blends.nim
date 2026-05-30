@@ -1,11 +1,16 @@
-# Desktop-only: this module contains shady/GLSL shader definitions that have
-# no PICA200 equivalent and cannot compile without `import shady`.
+# Desktop-only: this module contains shady/GLSL shader definitions (blend
+# modes, atlas/mask shaders). `shady` is desktop-only and cannot compile on
+# ds3, where rendering is fixed-function in citro3d_backend.
 #
-# On ds3, blend-mode handling is fixed-function in
-# `citro3d_backend.compositeLayer` (see `blendCategory`). Unsupported modes
-# warn once per session and fall back to NormalBlend.
-# Normal, Multiply, Screen, Mask, and Overwrite are handled directly;
-# all other modes use the warn-once fallback — no shader needed.
+# On ds3, blend-mode handling is in `citro3d_backend.compositeLayer`
+# (see `blendCategory`). Blend-mode fidelity on ds3:
+#   Normal / Screen / Overwrite — exact hardware equivalents
+#   Multiply / Mask              — degraded fixed-function approximations
+#                                  (see blendCategory docs in citro3d_backend)
+#   All other modes              — warn once per mode per session, fall back
+#                                  to NormalBlend (warnedBlendModes set)
+# Desktop consumers of blendingMain / atlasVert / atlasMain / maskMain are
+# already guarded in boxy.nim (boxy-25q tracks the remaining ds3 seam).
 
 when not defined(ds3):
   import shady, vmath
