@@ -269,6 +269,16 @@ when defined(ds3):
       ## Nintendo 3DS citro3d rendering backend.
       ## Atlas management, GPU atlas blit, quad batch, and layer RTT implemented.
       ##
+      ## ARC safety: this ref object holds NO back-reference to the Boxy object.
+      ## All state Boxy owns (handles, blend mode, tint, frame size) is passed as
+      ## explicit parameters. No reference cycles → ARC (--gc:arc, required for
+      ## devkitARM) can collect the Nim ref object without a cycle collector.
+      ## Note: ARC frees only the ARC-managed fields (strings, seqs) — the raw C
+      ## pointer fields (dvlb, blitVtxBuf, blitIdxBuf, quadVtxBuf, quadIdxBuf,
+      ## shaderProg, slot textures/RTs) require a deterministic teardown hook.
+      ## See freeShaderState and the follow-up bead for the backend destructor.
+      ## Do NOT add a Boxy field here.
+      ##
       ## Handle lifetime: handles are not validated against slot reuse. Never retain
       ## a TextureHandle or RenderTargetHandle past the matching delete call — a
       ## freed-then-reallocated slot will have the same id (ABA hazard).
@@ -389,28 +399,66 @@ when defined(ds3):
     ## Boxy's mip-walking loop calls all levels; levels above 0 carry no atlas data
     ## on this backend and are safely discarded.
     ##
-    ## DMA note: the mirror is in linearAlloc memory so the GX DMA engine can read
-    ## it. GSPGPU_FlushDataCache is called before the upload to flush the ARM11
-    ## write-back cache; without this the DMA reads stale physical RAM.
+    ## ARC lifetime audit: `image` (a pixie Image ref) is ARC-managed, but its
+    ## `data` seq is only accessed during the synchronous CPU copy in
+    ## swizzleTileIntoAtlas. The DMA (`c3dTexUpload`) reads from the linearAlloc
+    ## mirror, NOT from `image.data` — so ARC can collect `image` after this
+    ## method returns without affecting the DMA source. Safe by two-stage design:
+    ##   1. CPU copy: image.data → linearAlloc mirror (synchronous, no GPU)
+    ##   2. Upload: linearAlloc mirror → VRAM via c3dTexUpload, which calls
+    ##      C3D_TexLoadImage synchronously — the transfer completes before returning
+    ## No ARC hazard exists: upload source is linearAlloc (backend-owned, not collected).
     ##
-    ## Whole-mirror DMA on every call: blitAtlasToNewAtlas (boxy-z5d) keeps the
-    ## new atlas CPU mirror in sync with the GPU blit result via a block-copy, so
-    ## this DMA correctly includes old content plus the newly added tile.
+    ## GSPGPU_FlushDataCache is called before the upload to flush the ARM11
+    ## write-back cache; without this the transfer reads stale physical RAM.
+    ##
+    ## Whole-mirror DMA on every call: blitAtlasToNewAtlas keeps the new atlas
+    ## CPU mirror in sync via block-copy, so this DMA includes old content plus
+    ## the newly added tile.
     if level != 0: return
     if image.width == 0 or image.height == 0: return
     let i = b.slotIndex(handle)
     if i < 0:
       raise newException(BackendError, "uploadTile: invalid or freed handle")
     let side = b.texSlots[i].sideLen
+    # Stage 1: synchronous CPU copy of image pixels into the linearAlloc mirror.
+    # `image.data[0]` is only dereferenced here; the caller's live binding keeps
+    # `image` alive for the entire synchronous call — ARC borrows the parameter
+    # (no incref). The guard above (width/height == 0 → return) also ensures
+    # image.data is non-empty before this addr is taken.
     swizzleTileIntoAtlas(
       cast[ptr uint8](unsafeAddr image.data[0]),
       image.width, image.height,
       cast[ptr uint8](b.texSlots[i].mirror),
       side, side div 8, x, y)
-    # Flush CPU cache so the GX DMA reads the bytes just written, not stale
-    # cache lines. Required: the ARM11 write-back cache is not snooped by GX.
+    # Stage 2: flush and DMA from linearAlloc mirror to VRAM (synchronous).
     discard gspgpuFlushDataCache(b.texSlots[i].mirror, csize_t(side * side * 4))
     c3dTexUpload(addr b.texSlots[i].tex, b.texSlots[i].mirror)
+
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # freeShaderState — release blit shader resources (nil-guarded, idempotent)
+  # ---------------------------------------------------------------------------
+
+  proc freeShaderState(b: Citro3dBackend) =
+    ## Free all resources allocated at or after shaderProgramSetVsh in initBlitShader.
+    ## Nil-guarded: safe to call from any error path where dvlbParseFile succeeded,
+    ## and from the backend destructor (once added).
+    ##
+    ## libctru teardown order: linearFree → shaderProgramFree → dvlbFree.
+    ##   (The shader program holds DVLE pointers inside the DVLB; freeing
+    ##    the DVLB first would leave shaderProgramFree touching freed memory.)
+    ##
+    ## Note: NOT used for the shaderProgramInit-fail path because shaderProgramInit
+    ## failed before allocating any program state — that path only frees the DVLB.
+    ## Gating shaderProgramFree on `dvlb != nil` preserves this distinction when
+    ## calling from the destructor.
+    if b.blitIdxBuf != nil: linearFree(b.blitIdxBuf); b.blitIdxBuf = nil
+    if b.blitVtxBuf != nil: linearFree(b.blitVtxBuf); b.blitVtxBuf = nil
+    if b.dvlb != nil:
+      discard shaderProgramFree(addr b.shaderProg)
+      dvlbFree(b.dvlb); b.dvlb = nil
+    b.projReg = -1  # no field should outlive the resources it describes
 
   # ---------------------------------------------------------------------------
   # initBlitShader — lazy one-time setup for blitAtlasToNewAtlas
@@ -420,10 +468,13 @@ when defined(ds3):
     ## Load render2d.shbin at compile time, parse it, initialise the shader
     ## program, and allocate the blit quad vertex/index buffers in linearAlloc.
     ## Called once on the first blitAtlasToNewAtlas invocation.
-    # Copy the module-level const into a backend heap field so DVLB_s
-    # has a stable pointer that lives as long as the backend ref object.
-    # INVARIANT: do not mutate or resize b.shbinData after this point —
-    # DVLB_s holds an internal pointer into it and does not track reallocations.
+    # Copy the module-level const so DVLB_s has a stable heap pointer.
+    # INVARIANT: b.shbinData must not be mutated or resized after dvlbParseFile —
+    # the returned DVLB_s holds an internal pointer into b.shbinData's buffer.
+    # ARC note: b.shbinData (string, ARC-managed) outlives b.dvlb (ptr DVLB_s, raw C
+    # pointer) only as long as the backend ref is alive. ARC frees the string buffer;
+    # the DVLB_s is a raw pointer NOT freed by ARC — it requires an explicit dvlbFree
+    # via freeShaderState (called from error paths and the future backend destructor).
     b.shbinData = shbinDataConst
     b.dvlb = dvlbParseFile(
       cast[ptr uint32](unsafeAddr b.shbinData[0]),
@@ -431,24 +482,33 @@ when defined(ds3):
     if b.dvlb == nil:
       raise newException(BackendError,
         "initBlitShader: DVLB_ParseFile failed — is render2d.shbin valid?")
+    # From here: any raise must free b.dvlb first (b.shaderReady is still false,
+    # so a retry would dvlbParseFile again, orphaning the current allocation).
     if shaderProgramInit(addr b.shaderProg) != 0:
+      # shaderProgramInit failed before allocating program state: only free the DVLB.
+      # (shaderProgramFree must NOT be called here — there is nothing to free.)
+      dvlbFree(b.dvlb); b.dvlb = nil
       raise newException(BackendError, "initBlitShader: shaderProgramInit failed")
+    # From here: shaderProgramSetVsh may have linked program state into the DVLB.
+    # All subsequent error paths use freeShaderState (shaderProgramFree → dvlbFree).
     if shaderProgramSetVsh(addr b.shaderProg, b.dvlb.DVLE) != 0:
+      b.freeShaderState()
       raise newException(BackendError, "initBlitShader: shaderProgramSetVsh failed")
     b.projReg = dvleGetUniformRegister(b.dvlb.DVLE, "projection")
     if b.projReg < 0:
+      b.freeShaderState()
       raise newException(BackendError,
         "initBlitShader: 'projection' uniform not found in render2d.shbin")
 
     # Blit quad vertex buffer: 4 vertices in clip space, full-UV coverage.
     b.blitVtxBuf = linearAlloc(csize_t(4 * sizeof(BlitVtx)))
     if b.blitVtxBuf == nil:
+      b.freeShaderState()
       raise newException(BackendError,
         "initBlitShader: linearAlloc failed for blit vertex buffer")
     b.blitIdxBuf = linearAlloc(csize_t(6))
     if b.blitIdxBuf == nil:
-      linearFree(b.blitVtxBuf)
-      b.blitVtxBuf = nil
+      b.freeShaderState()
       raise newException(BackendError,
         "initBlitShader: linearAlloc failed for blit index buffer")
 
