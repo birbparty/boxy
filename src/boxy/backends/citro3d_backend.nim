@@ -3,10 +3,12 @@
 ## Provides:
 ##   - swizzleTileIntoAtlas: Morton/Z-order tile writer for GPU_RGBA8 uploads
 ##   - mortonIdx, pixieRgbaToGpuAbgr: exported helpers (unit-testable on host)
+##   - Pica200BlendCategory, blendCategory: blend mode classification (host-testable)
+##   - topScreenOrthoProj: OrthoTilt projection matrix (host-testable)
 ##   - Citro3dBackend: Backend subtype implementing atlas texture management
 ##
-## The swizzle utility has no citro3d dependency and compiles on any platform.
-## The Citro3dBackend type requires --define:ds3.
+## The swizzle, projection, and blend-category utilities have no citro3d
+## dependency and compile on any platform. Citro3dBackend requires --define:ds3.
 ##
 ## Morton convention (verified against devkitPro/tex3ds source/swizzle.cpp):
 ##   x bits occupy even positions, y bits odd positions.
@@ -16,6 +18,7 @@
 ##   GPU_RGBA8 stores bytes as A, B, G, R (ABGR) at increasing addresses.
 ##   Pixie's ColorRGBX stores R, G, B, A. Conversion = bswap32.
 
+import pixie   # BlendMode enum (used by host-testable blendCategory / Pica200BlendCategory)
 import backend_interface
 export backend_interface
 
@@ -117,6 +120,34 @@ proc swizzleTileIntoAtlas*(
 # enabling host-side unit testing (see tests/test_citro3d_swizzle.nim).
 # ---------------------------------------------------------------------------
 
+type
+  Pica200BlendCategory* = enum
+    ## How a `BlendMode` maps to PICA200 fixed-function TEV + alpha-blend hardware.
+    ##
+    ## Use `blendCategory()` to map a `BlendMode`. The citro3d backend uses this to
+    ## configure `C3D_AlphaBlend` without the caller knowing about GPU constants.
+    ##
+    ## Defined outside `when defined(ds3)` so it can be unit-tested on the host.
+    bcNormal     ## Standard premultiplied-alpha over: GPU_ONE / GPU_ONE_MINUS_SRC_ALPHA
+    bcMultiply   ## Approximated multiply via GPU_DST_COLOR src factor (degraded; no dst readback)
+    bcScreen     ## Screen: GPU_ONE / GPU_ONE_MINUS_SRC_COLOR
+    bcMask       ## Mask: GPU_ZERO / GPU_SRC_COLOR (maskShader lost; degraded on PICA200)
+    bcUnsupported ## No fixed-function equivalent; falls back to bcNormal with a one-time warning
+
+func blendCategory*(m: BlendMode): Pica200BlendCategory =
+  ## Maps a pixie `BlendMode` to its PICA200 fixed-function approximation category.
+  ##
+  ## NormalBlend and ScreenBlend map exactly. MultiplyBlend and MaskBlend are
+  ## degraded approximations (no programmable fragment shader on PICA200). All
+  ## other modes return bcUnsupported and the caller should warn once and fall
+  ## back to NormalBlend.
+  case m
+  of NormalBlend: bcNormal
+  of MultiplyBlend: bcMultiply
+  of ScreenBlend: bcScreen
+  of MaskBlend: bcMask
+  else: bcUnsupported
+
 func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
   ## Returns the OrthoTilt projection for the PICA200 top screen as a flat
   ## C3D_Mtx array in {w,z,y,x} row-major order, suitable for passing to
@@ -157,7 +188,7 @@ func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
 # ---------------------------------------------------------------------------
 
 when defined(ds3):
-  import pixie, vmath             # Image, BlendMode, Color (pixie re-exports chroma), IVec2
+  import vmath                    # IVec2, Vec2 (pixie imported at top-level for BlendMode/Color)
   import ../bindings/citro3d
   import ../bindings/libctru_gfx
   export citro3d
@@ -255,6 +286,9 @@ when defined(ds3):
       quadBufInfo: C3D_BufInfo
       quadCount: int         ## quads accumulated since last flush()
       quadBufsReady: bool
+      ## Per-mode unsupported-blend warning state: a bit is set on first warn so
+      ## the warning fires once per session rather than every compositeLayer call.
+      warnedBlendModes: set[BlendMode]
 
   proc newCitro3dBackend*(): Citro3dBackend =
     result = Citro3dBackend()
@@ -833,20 +867,27 @@ when defined(ds3):
     ## UV bounds are computed from frameSize / src.width × src.height so only
     ## the visible sub-region of the layer texture is sampled.
     ##
-    ## Blend modes Normal/Mask/Screen map to PICA200 fixed-function alpha blend.
-    ## Shader-blend modes (all others) are not implementable on the fixed-function
-    ## PICA200 pipeline and raise BackendError — they require a follow-on task
-    ## that adds multi-pass TEV or CPU compositing.
+    ## Blend mode handling uses `blendCategory()`:
+    ##   NormalBlend  → GPU_ONE / GPU_ONE_MINUS_SRC_ALPHA (premultiplied-alpha over)
+    ##   MultiplyBlend → GPU_DST_COLOR / GPU_ONE_MINUS_SRC_ALPHA (degraded: no dst readback)
+    ##   ScreenBlend  → GPU_ONE / GPU_ONE_MINUS_SRC_COLOR
+    ##   MaskBlend    → GPU_ZERO / GPU_SRC_COLOR (degraded: maskShader lost on PICA200)
+    ##   All others   → warn once to stderr, fall back to NormalBlend
+    ##
+    ## MultiplyBlend and MaskBlend are hardware approximations that differ from the
+    ## desktop GL backend for non-trivial content. See `blendCategory()` for details.
     ##
     ## The screen target (dst.isScreen()) is not yet wired — raises BackendError.
     if dst.isScreen():
       raise newException(BackendError,
         "compositeLayer: screen render target not yet wired in the ds3 backend")
 
-    if blendMode notin {NormalBlend, MaskBlend, ScreenBlend}:
-      raise newException(BackendError,
-        "compositeLayer: blend mode " & $blendMode &
-        " requires shader-blend path — not yet implemented on PICA200 fixed-function TEV")
+    let bcat = blendCategory(blendMode)
+    if bcat == bcUnsupported and blendMode notin b.warnedBlendModes:
+      b.warnedBlendModes.incl(blendMode)
+      stderr.writeLine(
+        "citro3d compositeLayer: blend mode " & $blendMode &
+        " has no PICA200 fixed-function equivalent — falling back to NormalBlend")
 
     if frameSize.x <= 0 or frameSize.y <= 0:
       raise newException(BackendError, "compositeLayer: non-positive frameSize")
@@ -896,23 +937,30 @@ when defined(ds3):
     c3dDepthTest(false, 0, 0)
 
     # Alpha blend by mode. All paths use premultiplied-alpha colors (from asRgbx).
-    case blendMode
-    of MaskBlend:
+    case bcat
+    of bcMask:
       # DEGRADED APPROXIMATION: the GL path also binds maskShader (a fragment shader
       # that broadcasts source alpha across RGB for luminance masking). PICA200 has no
       # programmable shaders so maskShader is unavailable. The blend factors below
       # (GPU_ZERO × src + GPU_SRC_COLOR × dst) replicate the blend equation but not
       # the per-pixel RGB rebroadcast, so colored mask content will differ from desktop.
-      # This matches the project's documented plan: "achievable via fixed-function blend
-      # factors but without maskShader — document the degraded behaviour."
       {.warning: "MaskBlend on PICA200 is a degraded approximation (maskShader unavailable); colored masks will differ from the desktop GL backend".}
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_ZERO, GPU_SRC_COLOR, GPU_ZERO, GPU_SRC_COLOR)
-    of ScreenBlend:
+    of bcScreen:
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_ONE, GPU_ONE_MINUS_SRC_COLOR,
                     GPU_ONE, GPU_ONE_MINUS_SRC_COLOR)
-    else: # NormalBlend (premultiplied-alpha over)
+    of bcMultiply:
+      # DEGRADED APPROXIMATION: true multiply requires sampling the destination texture.
+      # PICA200 fixed-function has no dst-readback in the TEV pipeline. Using
+      # GPU_DST_COLOR as the source blend factor approximates dst*src at the blend
+      # stage, but TEV still modulates src by vertex-color (tint) before blending, so
+      # the result diverges from the desktop GL blendShader path for colored content.
+      c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
+                    GPU_DST_COLOR, GPU_ONE_MINUS_SRC_ALPHA,
+                    GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
+    else: # bcNormal or bcUnsupported (bcUnsupported warned above, falls back to Normal)
       c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                     GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA,
                     GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA)
