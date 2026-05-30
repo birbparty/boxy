@@ -36,5 +36,9 @@ b.uploadTile(atlas, 0, 0, img, 0)
 # deleteTexture: release VRAM and linear mirror
 b.deleteTexture(atlas)
 
+# destroy: exercises the backend teardown path in a partially-freed state
+# (atlas slot already freed above) to verify idempotency. Device-pending.
+b.destroy()
+
 c3dFini()
 gfxExit()

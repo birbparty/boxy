@@ -1136,3 +1136,58 @@ when defined(ds3):
     ## NOTE: compositeLayer partially restores pipeline state (TEV, blend) after each
     ## call; restoreState is NOT the mechanism for that — see compositeLayer for details.
     discard
+
+  # ---------------------------------------------------------------------------
+  # destroy — deterministic teardown of all GPU/C/linearAlloc resources
+  # ---------------------------------------------------------------------------
+
+  method destroy*(b: Citro3dBackend) =
+    ## Release all raw resources owned by this backend, in the correct order.
+    ## Safe to call on a partially-initialised backend or after individual
+    ## deleteTexture/createLayerTarget calls — every step is nil-guarded.
+    ##
+    ## Order matters: free GPU objects before their backing buffers.
+    ##   1. freeShaderState: blit prog+dvlb, blitVtxBuf, blitIdxBuf
+    ##   2. quad buffers: quadVtxBuf, quadIdxBuf
+    ##   3. slot teardown: texSlots (VRAM tex + mirror) and rtSlots (RT)
+    ##
+    ## Call site: not yet wired — boxy.nim does not compile on ds3 (Boxy type
+    ## split is tracked in boxy-1gd). This method is provided so the call can
+    ## be wired deterministically at Boxy teardown once that seam lands.
+    ## Device-pending: a runtime run of atlas_compile_3ds.nim (which calls this
+    ## in its cleanup path) is needed to confirm idempotency on hardware.
+
+    # 1. Blit-shader resources (freeShaderState handles nil guards internally).
+    b.freeShaderState()
+
+    # 2. Quad batch buffers.
+    if b.quadIdxBuf != nil:
+      linearFree(b.quadIdxBuf)
+      b.quadIdxBuf = nil
+    if b.quadVtxBuf != nil:
+      linearFree(b.quadVtxBuf)
+      b.quadVtxBuf = nil
+    b.quadBufsReady = false
+    b.quadCount = 0
+
+    # 3a. RT slots: free render targets before their backing textures.
+    for i in 0 ..< maxRtSlots:
+      if b.rtSlots[i].used:
+        c3dRenderTargetDelete(b.rtSlots[i].rt)
+        b.rtSlots[i].rt      = nil
+        b.rtSlots[i].bytes   = 0
+        b.rtSlots[i].used    = false
+        b.rtSlots[i].cleared = false
+
+    # 3b. Texture slots: free VRAM texture and linearAlloc mirror.
+    # Skip linkedRt cleanup — already done above via the RT loop.
+    for i in 0 ..< maxTexSlots:
+      if b.texSlots[i].used:
+        c3dTexDelete(addr b.texSlots[i].tex)
+        if b.texSlots[i].mirror != nil:
+          linearFree(b.texSlots[i].mirror)
+          b.texSlots[i].mirror  = nil
+        b.texSlots[i].sideLen  = 0
+        b.texSlots[i].linkedRt = -1
+        b.texSlots[i].used     = false
+    b.atlasSideLen = 0

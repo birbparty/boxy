@@ -193,3 +193,16 @@ method restoreState*(backend: Backend, s: BackendStateSnapshot) {.base.} =
   ## vertex attribute binds (shader + position/color/uv buffers) from its
   ## own owned state — those are not in the snapshot.
   raise newException(BackendError, "restoreState not implemented")
+
+method destroy*(backend: Backend) {.base.} =
+  ## Release all GPU/C/linearAlloc resources owned by the backend.
+  ## Called deterministically by the owning Boxy at teardown.
+  ##
+  ## The base implementation is a no-op — this is deliberate and correct.
+  ## Unlike other base methods that raise "not implemented," a teardown hook
+  ## where doing nothing is a valid (e.g. OpenGL backend, where resources are
+  ## managed by the GL driver) must not crash when invoked on the base.
+  ##
+  ## Each backend overrides to free its own raw resources. The citro3d backend
+  ## uses freeShaderState + slot teardown. The OpenGL backend inherits this no-op.
+  discard
