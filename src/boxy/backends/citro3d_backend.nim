@@ -353,7 +353,7 @@ when defined(ds3):
     ## VRAM. `size` must be a power-of-two value in [512, maxAtlasSize].
     ##
     ## VRAM is required (not C3D_TexInit) because the atlas must serve as both
-    ## a sample source and a render target for blitAtlasToNewAtlas (boxy-z5d).
+    ## a sample source and a render target for blitAtlasToNewAtlas.
     doAssert (size and (size - 1)) == 0 and size >= 512 and size <= maxAtlasSize,
       "atlas size must be a power-of-two in [512, " & $maxAtlasSize & "], got " & $size
     let i = b.allocTexSlot()
@@ -1225,14 +1225,18 @@ when defined(ds3):
     # this mapping. Verified 2026-06-04 on Azahar.
     #
     # Triangle diagonal: blitIdxBuf is [0,1,2, 1,3,2] = triangles (BL,BR,TL) and (BR,TR,TL).
-    # In clip space with topScreenOrthoProj the diagonal runs from BR(-1,-1) to TL(+1,+1)
-    # — i.e. the line clip_y=clip_x. The image at logical (50,50) falls partially on both
-    # sides of this diagonal, so the image spans both triangles and no seam is visible.
+    # The shared BR→TL edge tiles the full quad — no uncovered region regardless of image
+    # position. In clip space with topScreenOrthoProj the shared edge runs from BR(-1,-1)
+    # to TL(+1,+1), i.e. the line clip_y=clip_x.
     #
-    # IMPORTANT: v2=TL, v3=TR here (NOT v2=TR, v3=TL as in the original design-doc sketch).
-    # Swapping them changes the quad diagonal from (BL→TR = clip_y=-clip_x) to (BR→TL =
-    # clip_y=clip_x). The BL→TR diagonal put the entire image in one triangle (invisible
-    # seam at the image boundary), producing the triangular-image artifact confirmed on Azahar.
+    # IMPORTANT: v2=TL, v3=TR here (NOT v2=TR, v3=TL as in the original design-doc
+    # sketch). The index buffer [0,1,2, 1,3,2] shares the edge between vertices 1 and 2,
+    # so the tiling diagonal always runs from v1(BR). With v2=TL the diagonal is BR→TL
+    # (clip_y=clip_x) and the two triangles tile the full quad. Swapping to v2=TR,v3=TL
+    # instead shares the BR–TR (right) edge: the triangles then OVERLAP on the right and
+    # leave an uncovered triangular GAP on the left (gap boundary = the BL→TR line,
+    # clip_y=-clip_x). The image gets clipped to that gap — the triangular-image artifact
+    # confirmed on Azahar.
     let vtx = cast[ptr UncheckedArray[RenderVtx]](b.blitVtxBuf)
     vtx[0] = RenderVtx(x: 0f, y: H,    u: 0f,   v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # BL
     vtx[1] = RenderVtx(x: W,  y: H,    u: uMax, v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # BR
@@ -1258,7 +1262,7 @@ when defined(ds3):
     # Re-use blitIdxBuf (actual pattern: [0,1,2, 1,3,2] from initBlitShader).
     # Vertex order matches blit path: v0=BL, v1=BR, v2=TL, v3=TR. The [0,1,2, 1,3,2]
     # index buffer produces a BR→TL diagonal (clip_y=clip_x), verified on Azahar 2026-06-04.
-    # See the IMPORTANT note above (lines 1232-1235) for why v2=TL,v3=TR is required.
+    # See the IMPORTANT vertex-order note above for why v2=TL,v3=TR is required.
     c3dDrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_BYTE, b.blitIdxBuf)
 
     # Restore pipeline state for subsequent draws. The flush() contract says the caller
