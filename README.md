@@ -86,14 +86,14 @@ Install via `dkp-pacman -S 3ds-dev`:
 | citro3d | 3DS GPU library (C3D_* API) |
 | picasso | PICA200 assembly shader compiler (`.v.pica` → `.shbin`) |
 | 3dsxtool | Packages the ELF into a runnable `.3dsx` file |
-| Azahar | Nintendo 3DS emulator for local testing |
+
+[Azahar](https://azahar-emu.org/) is a standalone Nintendo 3DS emulator used for local testing — install it separately from devkitPro.
 
 Other nimble dependencies (`bitty`, `pixie`, `vmath`) must already be installed in the nimble cache (`~/.nimble/pkgs`) before building — the 3DS build script calls `nim compile` directly and skips nimble dependency resolution.
 
 ### Build Steps
 
 ```sh
-chmod +x scripts/build_3ds.sh
 scripts/build_3ds.sh examples/basic_3ds.nim basic_3ds
 # Output: build/basic_3ds.3dsx
 ```
@@ -118,8 +118,8 @@ Load `build/basic_3ds.3dsx` in Azahar or transfer it to hardware via FBI.
 | `dropShadowEffect` | ✗ Compile error | Not defined when `--define:ds3` |
 | `getImage` | ✗ Compile error | Not defined when `--define:ds3` |
 | `readAtlas` | ✗ Compile error | Not defined when `--define:ds3` |
-| `enterRawOpenGLMode` | ⚠ Runtime warning | Defined on ds3 but writes a warning to stderr and returns immediately |
-| `exitRawOpenGLMode` | No-op | Defined on ds3, returns immediately |
+| `enterRawOpenGLMode` | ⚠ Runtime warning | Defined on ds3 but writes `"not supported"` to stderr and returns immediately |
+| `exitRawOpenGLMode` | ⚠ Runtime warning | Defined on ds3 but writes `"is a no-op"` to stderr and returns immediately |
 | `saveTransform` / `restoreTransform` | ✓ Works | |
 | `getImageSize` / `removeImage` / `contains` | ✓ Works | |
 
