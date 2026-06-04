@@ -187,8 +187,8 @@ func topScreenOrthoProj*(logicalW, logicalH: float32): array[16, float32] =
 # Citro3dBackend — Backend implementation for Nintendo 3DS
 #
 # Only compiled when --define:ds3 is active.
-# Atlas texture management (boxy-avl): implemented here.
-# Render targets, quad batching, TEV: follow-on tasks (boxy-z5d and beyond).
+# Atlas texture management, render targets, quad batching, TEV, and RTT layer
+# compositing are all implemented here.
 # ---------------------------------------------------------------------------
 
 when defined(ds3):
@@ -1256,10 +1256,9 @@ when defined(ds3):
     c3dSetBufInfo(addr bufInfo)
 
     # Re-use blitIdxBuf (actual pattern: [0,1,2, 1,3,2] from initBlitShader).
-    # Composite vertex order is v0=BL, v1=BR, v2=TR, v3=TL (differs from blit's
-    # v0=BL, v1=BR, v2=TL, v3=TR). The two orderings produce triangles along opposite
-    # diagonals but both tile the full quad — visually identical for a flat textured quad.
-    # Confirm winding is front-face CCW under the active cull mode on hardware.
+    # Vertex order matches blit path: v0=BL, v1=BR, v2=TL, v3=TR. The [0,1,2, 1,3,2]
+    # index buffer produces a BR→TL diagonal (clip_y=clip_x), verified on Azahar 2026-06-04.
+    # See the IMPORTANT note above (lines 1232-1235) for why v2=TL,v3=TR is required.
     c3dDrawElements(GPU_TRIANGLES, 6, C3D_UNSIGNED_BYTE, b.blitIdxBuf)
 
     # Restore pipeline state for subsequent draws. The flush() contract says the caller
