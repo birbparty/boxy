@@ -10,9 +10,8 @@
 ##        → bx.beginFrame → bx.drawImage → bx.endFrame → c3dFrameEnd
 ##   6. Exit on START button, cleanup
 ##
-## NOTE: no gfxSwapBuffers — citro3d's c3dFrameEnd performs the display transfer.
-## Calling gfxSwapBuffers after c3dFrameEnd would present the other (empty)
-## framebuffer and blank the screen.
+## NOTE: no gfxSwapBuffers — c3dFrameEnd performs the display transfer (see the
+## inline comment at the end of the main loop for why calling it would blank).
 ##
 ## Verified on Azahar: the test image renders upright at (50,50) over a dark-blue
 ## clear, with NormalBlend. Rendering relies on two PICA200 fixes landed alongside
