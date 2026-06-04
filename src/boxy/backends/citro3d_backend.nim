@@ -434,6 +434,10 @@ when defined(ds3):
     # Stage 2: flush and DMA from linearAlloc mirror to VRAM (synchronous).
     discard gspgpuFlushDataCache(b.texSlots[i].mirror, csize_t(side * side * 4))
     c3dTexUpload(addr b.texSlots[i].tex, b.texSlots[i].mirror)
+    # Flush the DESTINATION texture cache so the GPU samples the freshly-written
+    # texels instead of stale/zero memory (without this, textured draws sample
+    # black). Required for the memcpy path; harmless on the DMA path.
+    c3dTexFlush(addr b.texSlots[i].tex)
 
   # ---------------------------------------------------------------------------
   # ---------------------------------------------------------------------------
@@ -623,7 +627,7 @@ when defined(ds3):
     # uploadTile. clearBits=1 = color only; clearColor=0x00000000 = transparent black.
     c3dRenderTargetClear(rt, 1, 0x00000000'u32, 0)
 
-    c3dDepthTest(false, 0, 0)
+    c3dDepthTest(false, 0, GPU_WRITE_ALL)
 
     # No blending — copy source pixels verbatim.
     c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
@@ -843,7 +847,14 @@ when defined(ds3):
                      cast[ptr C3D_Mtx](addr proj[0]))
 
     # Depth test off — boxy's draw path is purely 2D.
-    c3dDepthTest(false, 0, 0)
+    c3dDepthTest(false, 0, GPU_WRITE_ALL)
+
+    # Cull off. topScreenOrthoProj has a negative determinant (it maps clip_x←y,
+    # clip_y←x, linear part [[0,-2/H],[-2/W,0]], det = -4/(HW) < 0), which flips
+    # triangle winding: boxy's CCW quads become CW in clip space. citro3d's
+    # C3D_Init default cull mode (GPU_CULL_BACK_CCW) would then cull every quad.
+    # Disabling cull is correct for 2D and removes the winding dependency.
+    c3dCullFace(GPU_CULL_NONE)
 
     # Premultiplied-alpha NormalBlend (GPU_ONE × src + GPU_ONE_MINUS_SRC_ALPHA × dst).
     c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
@@ -1085,7 +1096,7 @@ when defined(ds3):
     c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
                      cast[ptr C3D_Mtx](addr projMat[0]))
 
-    c3dDepthTest(false, 0, 0)
+    c3dDepthTest(false, 0, GPU_WRITE_ALL)
 
     # Alpha blend by mode. All paths use premultiplied-alpha colors (from asRgbx).
     case bcat

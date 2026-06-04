@@ -760,11 +760,16 @@ else:
       ]
       uvAtN = uvAt / boxy.atlasSize.float32
       uvToN = uvTo / boxy.atlasSize.float32
+      # PICA200 samples texture V from the bottom edge, opposite the swizzle's
+      # py=0 (top) row convention (swizzleTileIntoAtlas writes pixie row 0 at
+      # atlas py=0). Flip V (1 - v) so atlas row 0 maps to the top of the quad;
+      # without this the atlas samples the wrong rows (verified on Azahar:
+      # top-placed tiles read as transparent/black). Verified upright on-device.
       uvQuad = [
-        vec2(uvAtN.x, uvToN.y),
-        vec2(uvToN.x, uvToN.y),
-        vec2(uvToN.x, uvAtN.y),
-        vec2(uvAtN.x, uvAtN.y),
+        vec2(uvAtN.x, 1f - uvToN.y),
+        vec2(uvToN.x, 1f - uvToN.y),
+        vec2(uvToN.x, 1f - uvAtN.y),
+        vec2(uvAtN.x, 1f - uvAtN.y),
       ]
       tints = [tint, tint, tint, tint]
     # Downcast is safe: on ds3, newBoxy always assigns a Citro3dBackend.

@@ -24,3 +24,4 @@ build/
 .dolt/
 *.db
 .beads-credential-key
+assets/
