@@ -988,18 +988,20 @@ when defined(ds3):
   # ---------------------------------------------------------------------------
 
   method bindTarget*(b: Citro3dBackend, dst: RenderTargetHandle) =
-    ## Switch the active render target to `dst`.
+    ## Switch the active render target to `dst` and clear it to transparent black.
     ## Must be called inside an open C3D frame (between C3D_FrameBegin and C3D_FrameEnd).
-    ## Raises for the screen (id == 0) — the default/screen render target is not yet
-    ## wired into the citro3d backend (tracked by the ds3 boxy.nim port tasks).
+    ## Raises for the screen (id == 0) — the screen is an app-owned RT registered via
+    ## setScreenTarget; compositeLayer switches to it, not bindTarget.
     ##
-    ## First-use clear: c3dTexInitVram does not zero VRAM. On the first bindTarget call
-    ## for a freshly-created layer RT, this method clears to transparent black so the
-    ## layer starts fully transparent. This matches pushLayer's clearColor() in the GL path.
+    ## Per-frame clear: c3dRenderTargetClear is called unconditionally on every bindTarget
+    ## call, matching GL pushLayer's unconditional clearColor() on every push. This ensures
+    ## reused layer RTTs (boxy reuses the layerRTs seq across frames) start fully transparent
+    ## each frame, preventing stale previous-frame content from ghosting through transparent
+    ## regions. c3dRenderTargetClear is a GPU clear command, not a quad-batch flush — it
+    ## does not conflict with the single-flush-per-frame constraint.
     if dst.isScreen():
       raise newException(BackendError,
-        "bindTarget: screen render target not yet wired in the ds3 backend — " &
-        "see boxy.nim 3DS port tracking tasks")
+        "bindTarget: screen is app-owned — use setScreenTarget + compositeLayer, not bindTarget")
     let ri = dst.id - 1
     if ri < 0 or ri >= maxRtSlots or not b.rtSlots[ri].used:
       raise newException(BackendError,
@@ -1007,9 +1009,8 @@ when defined(ds3):
     if not c3dFrameDrawOn(b.rtSlots[ri].rt):
       raise newException(BackendError,
         "bindTarget: C3D_FrameDrawOn failed — is a frame open?")
-    if not b.rtSlots[ri].cleared:
-      c3dRenderTargetClear(b.rtSlots[ri].rt, 1, 0x00000000'u32, 0)
-      b.rtSlots[ri].cleared = true
+    c3dRenderTargetClear(b.rtSlots[ri].rt, 1, 0x00000000'u32, 0)
+    b.rtSlots[ri].cleared = true
 
   # ---------------------------------------------------------------------------
   # beginAtlasTarget / endAtlasTarget — atlas-as-RTT sync points
