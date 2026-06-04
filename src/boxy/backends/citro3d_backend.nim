@@ -303,6 +303,10 @@ when defined(ds3):
       ## Per-mode unsupported-blend warning state: a bit is set on first warn so
       ## the warning fires once per session rather than every compositeLayer call.
       warnedBlendModes: set[BlendMode]
+      ## Screen render target set by the app before using pushLayer/popLayer.
+      ## nil until setScreenTarget is called. compositeLayer raises if this is
+      ## nil when compositing to the screen (final popLayer).
+      screenRt: ptr C3D_RenderTarget
 
   proc newCitro3dBackend*(): Citro3dBackend =
     result = Citro3dBackend()
@@ -310,6 +314,13 @@ when defined(ds3):
       result.texSlots[i].linkedRt = -1
     # RtSlot zero-init: used=false, cleared=false, rt=nil, bytes=0 is correct.
     # No explicit rtSlots loop needed — Nim ref object fields default to zero.
+
+  proc setScreenTarget*(b: Citro3dBackend, rt: ptr C3D_RenderTarget) =
+    ## Register the physical screen render target so compositeLayer can composite
+    ## the final layer onto the screen (final popLayer with layerNum → -1).
+    ## Must be called before any pushLayer/popLayer that composites to screen.
+    ## Call this once after c3dRenderTargetCreate and before bx.beginFrame.
+    b.screenRt = rt
 
   proc allocTexSlot(b: Citro3dBackend): int =
     for i in 0 ..< maxTexSlots:
@@ -792,7 +803,7 @@ when defined(ds3):
     b.quadCount = 0
 
   proc prepareAtlasDraw*(b: Citro3dBackend, atlasHandle: TextureHandle,
-                         frameSize: IVec2) =
+                         frameSize: IVec2, forScreen: bool = true) =
     ## Set up PICA200 GPU state for the atlas draw path (drawImage / drawRect).
     ##
     ## PRECONDITIONS:
@@ -800,27 +811,26 @@ when defined(ds3):
     ##      enforces this; direct callers must check before invoking).
     ##   2. Must be called inside an open C3D frame (after c3dFrameBegin and
     ##      c3dFrameDrawOn) and before flush().
-    ##   3. The currently-bound render target MUST be the physical 3DS top screen.
-    ##      topScreenOrthoProj is hardwired here; it is wrong for the bottom
-    ##      screen and RTT targets (compositeLayer uses a non-tilted ortho for
-    ##      that reason). Renders to non-top-screen targets must supply their own
-    ##      projection and call the backend draw path directly.
+    ##   3. When forScreen=true, the RT must be the physical 3DS top screen.
+    ##      When forScreen=false (RTT layer target), a non-tilted ortho is used.
+    ##
+    ## `forScreen`:
+    ##   true  (default) — physical top screen target: uses topScreenOrthoProj
+    ##   false — RTT layer target (pushed via pushLayer): uses a non-tilted ortho
+    ##           matching compositeLayer's projection so quads render upright in
+    ##           the layer texture without the 90° screen tilt applied.
     ##
     ## Pipeline state set:
     ##   - shader:     render2d.shbin (lazy-initialised on first call)
-    ##   - projection: topScreenOrthoProj(frameSize) — 90° CCW tilt for the
-    ##                 physical top screen; beginFrame's proj argument is ignored
-    ##                 on ds3 for atlas draws
+    ##   - projection: topScreenOrthoProj(frameSize) when forScreen=true;
+    ##                 non-tilted ortho(0,W,H,0) when forScreen=false
     ##   - depth:      off (2D rendering only)
     ##   - blend:      premultiplied-alpha NormalBlend
     ##   - TEV:        MODULATE = texture0 × primary_color (for per-vertex tinting)
     ##                 Single stage; compositeLayer uses the same config for its
     ##                 NormalBlend arm.
-    ##   - cull:       not set — inherits the PICA200 default cull state.
-    ##                 Atlas quads are wound to be front-facing under that default
-    ##                 (see index-buffer construction at initQuadBufs). Any code
-    ##                 between c3dFrameDrawOn and this proc that changes cull mode
-    ##                 will silently break atlas draws.
+    ##   - cull:       GPU_CULL_NONE — both projections flip triangle winding
+    ##                 (negative determinant); disabling cull is correct for 2D.
     ##   - atlas tex:  atlasHandle bound to unit 0
     ##
     ## Single-flush-per-frame coupling: this proc is invoked once per frame,
@@ -830,7 +840,7 @@ when defined(ds3):
     ## per-flush state-setup story must be revisited.
     ##
     ## Caller pattern (in boxy.nim ds3 flush):
-    ##   b.prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
+    ##   b.prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize, forScreen)
     ##   b.flush()
     if not b.shaderReady:
       b.initBlitShader()
@@ -838,21 +848,32 @@ when defined(ds3):
     # Bind render2d shader (same binary used by blitAtlasToNewAtlas).
     c3dBindProgram(addr b.shaderProg)
 
-    # Upload tilted ortho projection for the PICA200 physical top screen.
+    # Upload projection: tilted (top-screen) or non-tilted (RTT layer).
     # topScreenOrthoProj composes ortho(0,W,H,0) with a 90° CCW rotation so
     # the logical frame (0,0)→(W,H) maps to the rotated physical display.
-    # compositeLayer uses a non-tilted ortho because it targets an RTT texture.
-    var proj = topScreenOrthoProj(frameSize.x.float32, frameSize.y.float32)
-    c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
-                     cast[ptr C3D_Mtx](addr proj[0]))
+    # The RTT path uses a standard non-tilted ortho (same as compositeLayer)
+    # because RTT textures are not rotated by the display hardware.
+    let W = frameSize.x.float32
+    let H = frameSize.y.float32
+    if forScreen:
+      var proj = topScreenOrthoProj(W, H)
+      c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                       cast[ptr C3D_Mtx](addr proj[0]))
+    else:
+      var proj = [
+        -1f,        0f,     0f, 2f/W,
+         1f,        0f, -2f/H,   0f,
+         0f, -1f/1000f,    0f,   0f,
+         1f,        0f,    0f,   0f]
+      c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                       cast[ptr C3D_Mtx](addr proj[0]))
 
     # Depth test off — boxy's draw path is purely 2D.
     c3dDepthTest(false, 0, GPU_WRITE_ALL)
 
-    # Cull off. topScreenOrthoProj has a negative determinant (it maps clip_x←y,
-    # clip_y←x, linear part [[0,-2/H],[-2/W,0]], det = -4/(HW) < 0), which flips
-    # triangle winding: boxy's CCW quads become CW in clip space. citro3d's
-    # C3D_Init default cull mode (GPU_CULL_BACK_CCW) would then cull every quad.
+    # Cull off. Both topScreenOrthoProj (axis-swap) and the non-tilted ortho
+    # (Y-flip) have negative determinants, flipping triangle winding so that
+    # quads become CW in clip space. GPU_CULL_BACK_CCW would cull them all.
     # Disabling cull is correct for 2D and removes the winding dependency.
     c3dCullFace(GPU_CULL_NONE)
 
@@ -1034,10 +1055,14 @@ when defined(ds3):
     ## MultiplyBlend and MaskBlend are hardware approximations that differ from the
     ## desktop GL backend for non-trivial content. See `blendCategory()` for details.
     ##
-    ## The screen target (dst.isScreen()) is not yet wired — raises BackendError.
-    if dst.isScreen():
+    ## Screen target (dst.isScreen()): supported when setScreenTarget has been called.
+    ## Compositing to screen uses topScreenOrthoProj (tilted) so the final layer
+    ## appears correctly on the rotated physical top-screen LCD.
+    ## RTT target: uses a non-tilted ortho (standard Y-down → clip).
+    let isScreen = dst.isScreen()
+    if isScreen and b.screenRt == nil:
       raise newException(BackendError,
-        "compositeLayer: screen render target not yet wired in the ds3 backend")
+        "compositeLayer: screen render target not set — call setScreenTarget before pushLayer/popLayer")
 
     if frameSize.x <= 0 or frameSize.y <= 0:
       raise newException(BackendError, "compositeLayer: non-positive frameSize")
@@ -1048,10 +1073,11 @@ when defined(ds3):
     if src.width <= 0 or src.height <= 0:
       raise newException(BackendError, "compositeLayer: src has non-positive dimensions")
 
-    let ri = dst.id - 1
-    if ri < 0 or ri >= maxRtSlots or not b.rtSlots[ri].used:
-      raise newException(BackendError,
-        "compositeLayer: invalid dst RenderTargetHandle (id=" & $dst.id & ")")
+    if not isScreen:
+      let ri = dst.id - 1
+      if ri < 0 or ri >= maxRtSlots or not b.rtSlots[ri].used:
+        raise newException(BackendError,
+          "compositeLayer: invalid dst RenderTargetHandle (id=" & $dst.id & ")")
 
     # Reject src aliasing dst (read-after-write hazard on PICA200).
     # backend_interface.nim:181 documents dstTexture as the hook for this check.
@@ -1075,12 +1101,21 @@ when defined(ds3):
       b.initBlitShader()
 
     # Switch render target to dst.
-    if not c3dFrameDrawOn(b.rtSlots[ri].rt):
-      raise newException(BackendError,
-        "compositeLayer: C3D_FrameDrawOn failed — is a frame open?")
+    # Screen: use the app-registered screenRt (topScreenOrthoProj, tilted).
+    # RTT:    use the slot render target (non-tilted ortho).
+    if isScreen:
+      if not c3dFrameDrawOn(b.screenRt):
+        raise newException(BackendError,
+          "compositeLayer: C3D_FrameDrawOn failed for screen target — is a frame open?")
+    else:
+      let ri = dst.id - 1
+      if not c3dFrameDrawOn(b.rtSlots[ri].rt):
+        raise newException(BackendError,
+          "compositeLayer: C3D_FrameDrawOn failed — is a frame open?")
 
-    # Ortho projection for the compositing quad: maps screen coords (0,0)→(W,H)
-    # to clip (-1,-1)→(+1,+1). Matches GL ortho(0, W, H, 0, -1000, 1000).
+    # Ortho projection for the compositing quad.
+    # Screen target: topScreenOrthoProj (90° CCW tilt for physical top-screen LCD).
+    # RTT target: non-tilted ortho — maps (0,0)→(W,H) to clip (-1,-1)→(+1,+1).
     # Layout: C3D_FVec rows store {w, z, y, x}. Each row maps one clip component:
     #   Row 0 (clip_x): {tx=-1, 0, 0, sx=2/W}
     #   Row 1 (clip_y): {ty=1, 0, sy=-2/H, 0}   (Y flipped: boxy Y=0 → clip +1)
@@ -1088,15 +1123,25 @@ when defined(ds3):
     #   Row 3 (clip_w): {1, 0, 0, 0}
     let W = frameSize.x.float32
     let H = frameSize.y.float32
-    var projMat = [
-      -1f,        0f,     0f, 2f/W,
-       1f,        0f, -2f/H,   0f,
-       0f, -1f/1000f,    0f,   0f,
-       1f,        0f,    0f,   0f]
-    c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
-                     cast[ptr C3D_Mtx](addr projMat[0]))
+    if isScreen:
+      var projMat = topScreenOrthoProj(W, H)
+      c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                       cast[ptr C3D_Mtx](addr projMat[0]))
+    else:
+      var projMat = [
+        -1f,        0f,     0f, 2f/W,
+         1f,        0f, -2f/H,   0f,
+         0f, -1f/1000f,    0f,   0f,
+         1f,        0f,    0f,   0f]
+      c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
+                       cast[ptr C3D_Mtx](addr projMat[0]))
 
     c3dDepthTest(false, 0, GPU_WRITE_ALL)
+
+    # Cull off. topScreenOrthoProj (screen) has negative determinant (axis-swap);
+    # the RTT ortho (non-tilted) has negative determinant (Y-flip). Both flip
+    # winding so quads become CW in clip space. GPU_CULL_BACK_CCW would cull them.
+    c3dCullFace(GPU_CULL_NONE)
 
     # Alpha blend by mode. All paths use premultiplied-alpha colors (from asRgbx).
     case bcat

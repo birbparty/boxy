@@ -10,9 +10,11 @@ const ignore = [
   # Require --define:ds3 (devkitARM cross-compilation); use scripts/build_3ds.sh.
   "blank_3ds.nim",
   "atlas_compile_3ds.nim",
+  "basic_3ds.nim",
   "milestone2_3ds.nim",
   "milestone3_3ds.nim",
   "milestone4_3ds.nim",
+  "milestone6_3ds.nim",
 ]
 
 # Scan for files.

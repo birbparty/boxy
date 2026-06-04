@@ -190,18 +190,20 @@ else:
   proc flush(boxy: Boxy) =
     ## Submit current quad batch via the citro3d backend.
     ## Precondition: called inside an open C3D frame (c3dFrameBegin..c3dFrameEnd)
-    ## with the render target already bound (c3dFrameDrawOn called by the app).
+    ## with the render target already bound (c3dFrameDrawOn called by the app or
+    ## by bindTarget/compositeLayer when inside a pushLayer/popLayer pair).
     boxy.entriesBuffered.clear()
     if boxy.quadCount > 0:
       # Set up PICA200 GPU state before submitting: shader, projection, TEV,
       # atlas bind, blend. Uses downcast — safe: ds3 newBoxy always assigns
       # Citro3dBackend, and prepareAtlasDraw is not in the Backend vtable.
       #
-      # PRECONDITION (projection contract): the app MUST have bound the physical
-      # top screen via c3dFrameDrawOn before this flush.  prepareAtlasDraw always
-      # uploads the 90°-tilted top-screen projection; it produces wrong output for
-      # the bottom screen or RTT targets.  See prepareAtlasDraw docstring.
-      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
+      # forScreen=true: use topScreenOrthoProj (tilted) — correct when the active
+      # RT is the physical top screen (layerNum < 0, drawing outside any layer).
+      # forScreen=false: use non-tilted ortho — correct when drawing into an RTT
+      # layer (layerNum >= 0, after pushLayer has called bindTarget).
+      let forScreen = boxy.layerNum < 0
+      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize, forScreen)
     boxy.backend.flush()
     boxy.quadCount = 0
 
@@ -1028,6 +1030,61 @@ when not defined(ds3):
     swap(boxy.layerTextures[shadowLayerId], boxy.layerTextures[mainLayerId])
     swap(boxy.layerFramebuffers[shadowLayerId], boxy.layerFramebuffers[mainLayerId])
     boxy.popLayer()
+
+when defined(ds3):
+  proc pushLayer*(boxy: Boxy) =
+    ## Starts drawing into a new RTT layer on Nintendo 3DS.
+    ##
+    ## Flushes any pending atlas draws to the current render target, increments
+    ## the layer stack, allocates a VRAM layer texture + render target if needed,
+    ## and calls bindTarget to redirect subsequent draws into the layer.
+    ##
+    ## SINGLE-FLUSH-PER-FRAME: the citro3d quad batch may only flush once per
+    ## C3D frame (linearAlloc vertex buffer). Call pushLayer before any drawImage
+    ## calls in a frame so the flush budget is consumed by the layer draw, not
+    ## split across pre-layer and in-layer draws.
+    ##
+    ## Precondition: beginFrame must have been called; c3dFrameBegin must be open.
+    if not boxy.frameBegun:
+      raise newException(BoxyError, "beginFrame has not been called")
+    boxy.flush()
+    inc boxy.layerNum
+    if boxy.layerNum >= boxy.layerRTs.len:
+      # Allocate a new VRAM RTT layer (createLayerTarget pads to POT, VRAM budget checked).
+      boxy.layerRTs.add(boxy.backend.createLayerTarget(boxy.frameSize.x, boxy.frameSize.y))
+    # Switch the active citro3d render target to the layer RT.
+    # bindTarget calls C3D_FrameDrawOn and clears on first use.
+    boxy.backend.bindTarget(boxy.layerRTs[boxy.layerNum].rt)
+
+  proc popLayer*(
+    boxy: Boxy,
+    tint = color(1, 1, 1, 1),
+    blendMode: BlendMode = NormalBlend
+  ) =
+    ## Pops the current RTT layer and composites it onto the next layer or screen.
+    ##
+    ## Flushes any pending atlas draws to the layer, then calls compositeLayer to
+    ## blend the layer texture onto the destination:
+    ##   - If there is a lower layer (layerNum > 0): composite onto that layer.
+    ##   - If this is the outermost layer (layerNum == 0): composite onto the
+    ##     physical top screen via the screenRt set by setScreenTarget.
+    ##
+    ## For the screen destination, compositeLayer uses topScreenOrthoProj (tilted)
+    ## so the composited layer appears upright on the rotated physical LCD.
+    ##
+    ## Precondition: pushLayer must have been called (layerNum >= 0).
+    ## setScreenTarget must have been called before the outermost popLayer.
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "popLayer called without pushLayer")
+    boxy.flush()
+    let srcTex = boxy.layerRTs[boxy.layerNum].tex
+    dec boxy.layerNum
+    let (dstRt, dstTex) = if boxy.layerNum >= 0:
+      (boxy.layerRTs[boxy.layerNum].rt, boxy.layerRTs[boxy.layerNum].tex)
+    else:
+      (defaultRenderTarget(), noTextureHandle())  # screen — compositeLayer uses screenRt
+    boxy.backend.compositeLayer(srcTex, dstRt, dstTex, blendMode, tint,
+                                boxy.frameSize, boxy.atlasSize)
 
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
   ## Starts a new frame.
