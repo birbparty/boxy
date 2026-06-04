@@ -1309,11 +1309,8 @@ when defined(ds3):
     ## freeShaderState resets shaderReady=false so blitAtlasToNewAtlas cannot
     ## re-enter freed buffers, but this is a safety net, not a license to reuse.
     ##
-    ## Call site: not yet wired — boxy.nim does not compile on ds3 (Boxy type
-    ## split is tracked in boxy-1gd). This method is provided so the call can
-    ## be wired deterministically at Boxy teardown once that seam lands.
-    ## Device-pending: a runtime run of atlas_compile_3ds.nim (which calls this
-    ## in its cleanup path) is needed to confirm idempotency on hardware.
+    ## Call site: boxy.nim:destroy (Boxy.backend.destroy()). Call before c3dFini.
+    ## atlas_compile_3ds.nim exercises this teardown path on Azahar.
 
     # 1. Blit-shader resources (freeShaderState handles nil guards internally).
     b.freeShaderState()
