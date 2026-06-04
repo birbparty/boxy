@@ -1,7 +1,7 @@
 ## GLSL spread-effect shader procs (spreadXMain, spreadYMain).
 ## Desktop/OpenGL only — the entire module is guarded under
-## when not defined(ds3). Spread effects are unavailable on 3DS (infeasible
-## without fragment shaders); this shady-DSL module is not compiled for ds3.
+## when not defined(ds3). Spread effects are not implemented on 3DS — PICA200
+## has no programmable fragment stage; this shady-DSL module is not compiled for ds3.
 
 when not defined(ds3):
   import shady, vmath

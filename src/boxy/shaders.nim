@@ -1,7 +1,7 @@
 ## GLSL shader compilation and uniform binding. Desktop/OpenGL only — the
 ## entire module is guarded under when not defined(ds3). On 3DS, the vertex
-## shader is a PICA200 .shbin embedded via citro3d_backend; this module is
-## not compiled for ds3.
+## shader is render2d.shbin loaded via citro3d_backend (staticRead at build
+## time); this module is not compiled for ds3.
 
 
 when not defined(ds3):

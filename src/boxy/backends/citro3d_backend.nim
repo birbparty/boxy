@@ -1310,7 +1310,7 @@ when defined(ds3):
     ## re-enter freed buffers, but this is a safety net, not a license to reuse.
     ##
     ## Call site: boxy.nim:destroy (Boxy.backend.destroy()). Call before c3dFini.
-    ## Verified via atlas_compile_3ds.nim which exercises this teardown path.
+    ## atlas_compile_3ds.nim exercises this teardown path on Azahar.
 
     # 1. Blit-shader resources (freeShaderState handles nil guards internally).
     b.freeShaderState()
