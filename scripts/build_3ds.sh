@@ -32,8 +32,10 @@
 #
 # NOTE: This script calls 'nim compile' directly — NOT 'nimble build' — to
 # skip nimble dependency resolution for windy, which does not cross-compile
-# for ARMv6K.  Other nimble deps (bitty, shady) must already be installed in
+# for ARMv6K.  Other nimble deps (bitty, pixie) must already be installed in
 # the nimble cache (~/.nimble/pkgs) before running this script.
+# Note: shady is desktop-only (guarded by 'when not defined(ds3)') and is NOT
+# required for 3DS builds.
 #
 # NOTE: nim_3ds.cfg is copied to nim.cfg so Nim auto-discovers it.  Nim has
 # no --config flag; auto-discovery is the only supported mechanism.  nim.cfg
