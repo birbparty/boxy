@@ -25,6 +25,9 @@ for f in files:
     quit("Example did not compile successfully")
 
 # Run all if not in GitHub Actions.
+# Gate scope: compile + liveness (exit-code-0) only. Windowed examples open
+# a window and exit; headless GL examples may still exit 0 even if shaders
+# fail to compile and nothing renders. Visual correctness is not verified here.
 let isGithubActions = getEnv("GITHUB_ACTIONS") == "true"
 if not isGithubActions:
   for f in files:
