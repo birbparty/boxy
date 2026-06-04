@@ -20,10 +20,10 @@
 ##   The composited layer appears correctly over the blue clear: the test image
 ##   is visible, upright, at the expected position, with no rotation or mirroring.
 ##
-## V-orientation note (see boxy-73n): compositeLayer UV mapping (:1179-1182 in
-## citro3d_backend.nim) was NOT verified on-device before this milestone. If the
-## composite appears upside-down, the UV v-values may need to mirror as in the
-## atlas draw path. Record the finding and file a follow-up bead.
+## V-orientation note: compositeLayer UV mapping was verified on Azahar 2026-06-04.
+## V=0=bottom is correct (standard GPU convention); do NOT flip V. The triangular-image
+## artifact seen during development was caused by the BL→TR quad diagonal (wrong vertex
+## order), not by V-axis orientation. Fixed in citro3d_backend.nim (v2=TL, v3=TR).
 ##
 ## NOTE: no gfxSwapBuffers — c3dFrameEnd handles the display transfer.
 ##
