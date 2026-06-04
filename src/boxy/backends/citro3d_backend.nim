@@ -1218,14 +1218,26 @@ when defined(ds3):
     # Tint color via asRgbx() for premultiplied-alpha consistency.
     let tc = tint.asRgbx()
 
-    # Compositing quad — vertex order matches addQuad:
-    #   v0=BL(0,H), v1=BR(W,H), v2=TR(W,0), v3=TL(0,0)
-    # UV V=0 at clip Y=-1 (bottom), V=vMax at clip Y=+1 (top) — PICA200 convention.
+    # Compositing quad — vertex order: v0=BL(0,H), v1=BR(W,H), v2=TL(0,0), v3=TR(W,0)
+    #
+    # V-axis: V=0 at y=H (logical bottom), V=vMax at y=0 (logical top). The PICA200
+    # RTT framebuffer stores clip_y=+1 (logical top) at the highest V value, matching
+    # this mapping. Verified 2026-06-04 on Azahar.
+    #
+    # Triangle diagonal: blitIdxBuf is [0,1,2, 1,3,2] = triangles (BL,BR,TL) and (BR,TR,TL).
+    # In clip space with topScreenOrthoProj the diagonal runs from BR(-1,-1) to TL(+1,+1)
+    # — i.e. the line clip_y=clip_x. The image at logical (50,50) falls partially on both
+    # sides of this diagonal, so the image spans both triangles and no seam is visible.
+    #
+    # IMPORTANT: v2=TL, v3=TR here (NOT v2=TR, v3=TL as in the original design-doc sketch).
+    # Swapping them changes the quad diagonal from (BL→TR = clip_y=-clip_x) to (BR→TL =
+    # clip_y=clip_x). The BL→TR diagonal put the entire image in one triangle (invisible
+    # seam at the image boundary), producing the triangular-image artifact confirmed on Azahar.
     let vtx = cast[ptr UncheckedArray[RenderVtx]](b.blitVtxBuf)
-    vtx[0] = RenderVtx(x: 0f, y: H,    u: 0f,   v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)
-    vtx[1] = RenderVtx(x: W,  y: H,    u: uMax, v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)
-    vtx[2] = RenderVtx(x: W,  y: 0f,   u: uMax, v: vMax,  r: tc.r, g: tc.g, b: tc.b, a: tc.a)
-    vtx[3] = RenderVtx(x: 0f, y: 0f,   u: 0f,   v: vMax,  r: tc.r, g: tc.g, b: tc.b, a: tc.a)
+    vtx[0] = RenderVtx(x: 0f, y: H,    u: 0f,   v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # BL
+    vtx[1] = RenderVtx(x: W,  y: H,    u: uMax, v: 0f,    r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # BR
+    vtx[2] = RenderVtx(x: 0f, y: 0f,   u: 0f,   v: vMax,  r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # TL
+    vtx[3] = RenderVtx(x: W,  y: 0f,   u: uMax, v: vMax,  r: tc.r, g: tc.g, b: tc.b, a: tc.a)  # TR
     discard gspgpuFlushDataCache(b.blitVtxBuf, csize_t(4 * sizeof(RenderVtx)))
 
     # Attribute layout — same as blit/quad: v0=pos(float×2), v1=uv(float×2), v2=color(u8×4).
