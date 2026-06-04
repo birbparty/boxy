@@ -1,6 +1,6 @@
 ## GPU buffer management. Desktop/OpenGL only — the entire module is
-## guarded under when not defined(ds3). On 3DS, buffer management will
-## be handled internally by the citro3d backend (not yet implemented).
+## guarded under when not defined(ds3). On 3DS, buffer management is
+## handled internally by the citro3d backend (linearAlloc quad/index buffers).
 
 when not defined(ds3):
   import opengl
