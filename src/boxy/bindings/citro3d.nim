@@ -340,7 +340,24 @@ proc c3dAlphaBlend*(colorEq: GpuBlendEquation, alphaEq: GpuBlendEquation,
                     srcAlpha: GpuBlendFactor, dstAlpha: GpuBlendFactor)
   {.importc: "C3D_AlphaBlend", header: "citro3d.h".}
 
-proc c3dDepthTest*(enable: bool, function: int32, writemask: int32)
+# GPU_WRITEMASK — enums.h. The third arg of C3D_DepthTest is the color/depth
+# WRITE MASK, applied unconditionally (independent of the enable flag) via
+# GPUREG_DEPTHTEST_CONFIG. Passing 0 writes NO channels — every rasterized
+# fragment is discarded at the output merger (clears bypass this, so the
+# symptom is "clear shows but no geometry renders"). Always pass a real mask;
+# use GPU_WRITE_COLOR (0x0F) or GPU_WRITE_ALL (0x1F) even when depth is off.
+type GpuWriteMask* = distinct int32
+
+const
+  GPU_WRITE_RED*   = GpuWriteMask(0x01)
+  GPU_WRITE_GREEN* = GpuWriteMask(0x02)
+  GPU_WRITE_BLUE*  = GpuWriteMask(0x04)
+  GPU_WRITE_ALPHA* = GpuWriteMask(0x08)
+  GPU_WRITE_DEPTH* = GpuWriteMask(0x10)
+  GPU_WRITE_COLOR* = GpuWriteMask(0x0F)  ## all four color channels
+  GPU_WRITE_ALL*   = GpuWriteMask(0x1F)  ## color + depth
+
+proc c3dDepthTest*(enable: bool, function: int32, writemask: GpuWriteMask)
   {.importc: "C3D_DepthTest", header: "citro3d.h".}
 
 # GPU_CULLMODE — enums.h

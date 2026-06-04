@@ -188,7 +188,7 @@ while aptMainLoop():
   discard c3dFrameDrawOn(topTarget)
   c3dRenderTargetClear(topTarget, 1, 0x00000000'u32, 0)  # black background
 
-  c3dDepthTest(false, 0, 0)
+  c3dDepthTest(false, 0, GPU_WRITE_ALL)
   c3dCullFace(GPU_CULL_NONE)
   c3dAlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD,
                 GPU_ONE, GPU_ZERO, GPU_ONE, GPU_ZERO)
