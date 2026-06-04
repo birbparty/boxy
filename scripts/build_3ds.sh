@@ -145,12 +145,33 @@ fi
 # --- stage 4: package .3dsx ---
 echo "Packaging .3dsx..."
 TOOL_ARGS=("$BUILD_DIR/$APP_NAME.elf" "$BUILD_DIR/$APP_NAME.3dsx")
-[[ -f "$BUILD_DIR/$APP_NAME.smdh" ]] && TOOL_ARGS+=("--smdh=$BUILD_DIR/$APP_NAME.smdh")
-# Only pass --romfs if the directory contains at least one file; 3dsxtool
-# errors with "Cannot open SMDH file!" when given an empty romfs dir.
+
+# Determine if romfs will be included (non-empty directory).
+ROMFS_ARGS=()
 if [[ -n "$(find "$ROMFS_DIR" -mindepth 1 -maxdepth 1 2>/dev/null)" ]]; then
-  TOOL_ARGS+=("--romfs=$ROMFS_DIR")
+  ROMFS_ARGS+=("--romfs=$ROMFS_DIR")
 fi
+
+# Add SMDH if available.
+# NOTE: some versions of 3dsxtool require an SMDH when --romfs is specified
+# and emit the misleading "Cannot open SMDH file!" error when it is absent.
+# Workaround: if no per-target SMDH was generated but romfs is needed, fall
+# back to any existing SMDH in the build directory.
+if [[ -f "$BUILD_DIR/$APP_NAME.smdh" ]]; then
+  TOOL_ARGS+=("--smdh=$BUILD_DIR/$APP_NAME.smdh")
+elif [[ ${#ROMFS_ARGS[@]} -gt 0 ]]; then
+  FALLBACK_SMDH=$(find "$BUILD_DIR" -maxdepth 1 -name "*.smdh" | head -1)
+  if [[ -n "$FALLBACK_SMDH" ]]; then
+    echo "Note: using fallback SMDH ($FALLBACK_SMDH) — no per-target SMDH generated." >&2
+    TOOL_ARGS+=("--smdh=$FALLBACK_SMDH")
+  else
+    echo "Warning: romfs requested but no SMDH available; 3dsxtool may fail." >&2
+    echo "  Run 'scripts/build_3ds.sh examples/basic_3ds.nim basic_3ds' with icons first," >&2
+    echo "  or set ICON48 and ICON24 env vars to generate a new SMDH." >&2
+  fi
+fi
+
+TOOL_ARGS+=("${ROMFS_ARGS[@]}")
 3dsxtool "${TOOL_ARGS[@]}"
 
 echo "Built: $BUILD_DIR/$APP_NAME.3dsx"

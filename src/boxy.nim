@@ -49,10 +49,10 @@ type
       layerTextures: seq[Texture]      ## Layers array for pushing and popping.
       layerFramebuffers: seq[GLuint]   ## Attachment targets for layer textures.
     else:
-      # layerRTs: not yet populated — pushLayer/popLayer on ds3 is unimplemented.
-      # Declared as a placeholder; layerNum stays -1 on ds3 so endFrame's
-      # `layerNum != -1` guard is always satisfied without touching this seq.
       layerRTs: seq[tuple[tex: TextureHandle, rt: RenderTargetHandle]]
+      # ds3 single-flush-per-frame guard: set true by the first non-empty flush in a
+      # C3D frame, reset to false in beginFrame. A second non-empty flush raises BoxyError.
+      ds3FlushUsed: bool
     atlasSize: int                   ## Size x size dimensions of the atlas.
     quadCount: int                   ## Number of quads drawn so far in this batch.
     quadsPerBatch: int               ## Max quads in a batch before issuing an OpenGL call.
@@ -190,18 +190,30 @@ else:
   proc flush(boxy: Boxy) =
     ## Submit current quad batch via the citro3d backend.
     ## Precondition: called inside an open C3D frame (c3dFrameBegin..c3dFrameEnd)
-    ## with the render target already bound (c3dFrameDrawOn called by the app).
+    ## with the render target already bound (c3dFrameDrawOn called by the app or
+    ## by bindTarget/compositeLayer when inside a pushLayer/popLayer pair).
+    ##
+    ## SINGLE-FLUSH-PER-FRAME GUARD: the citro3d linearAlloc quad buffer forbids
+    ## more than one non-empty flush per C3D frame. A second non-empty flush raises
+    ## BoxyError. This prevents silent corruption where a second DrawElements call
+    ## overwrites the shared vertex buffer before the GPU reads the first draw.
     boxy.entriesBuffered.clear()
     if boxy.quadCount > 0:
+      if boxy.ds3FlushUsed:
+        raise newException(BoxyError,
+          "ds3: single-flush-per-frame violated — call pushLayer before any drawImage in this frame, " &
+          "and do not draw after popLayer. Only one non-empty flush is allowed per C3D frame.")
+      boxy.ds3FlushUsed = true
       # Set up PICA200 GPU state before submitting: shader, projection, TEV,
       # atlas bind, blend. Uses downcast — safe: ds3 newBoxy always assigns
       # Citro3dBackend, and prepareAtlasDraw is not in the Backend vtable.
       #
-      # PRECONDITION (projection contract): the app MUST have bound the physical
-      # top screen via c3dFrameDrawOn before this flush.  prepareAtlasDraw always
-      # uploads the 90°-tilted top-screen projection; it produces wrong output for
-      # the bottom screen or RTT targets.  See prepareAtlasDraw docstring.
-      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize)
+      # forScreen=true: use topScreenOrthoProj (tilted) — correct when the active
+      # RT is the physical top screen (layerNum < 0, drawing outside any layer).
+      # forScreen=false: use non-tilted ortho — correct when drawing into an RTT
+      # layer (layerNum >= 0, after pushLayer has called bindTarget).
+      let forScreen = boxy.layerNum < 0
+      Citro3dBackend(boxy.backend).prepareAtlasDraw(boxy.atlasHandle, boxy.frameSize, forScreen)
     boxy.backend.flush()
     boxy.quadCount = 0
 
@@ -1029,6 +1041,68 @@ when not defined(ds3):
     swap(boxy.layerFramebuffers[shadowLayerId], boxy.layerFramebuffers[mainLayerId])
     boxy.popLayer()
 
+when defined(ds3):
+  proc pushLayer*(boxy: Boxy) =
+    ## Starts drawing into a new RTT layer on Nintendo 3DS.
+    ##
+    ## Flushes any pending atlas draws to the current render target, increments
+    ## the layer stack, allocates a VRAM layer texture + render target if needed,
+    ## and calls bindTarget to redirect subsequent draws into the layer.
+    ##
+    ## SINGLE-FLUSH-PER-FRAME: the citro3d quad batch may only flush once per
+    ## C3D frame (linearAlloc vertex buffer). Call pushLayer before any drawImage
+    ## calls in a frame so the flush budget is consumed by the layer draw, not
+    ## split across pre-layer and in-layer draws.
+    ##
+    ## Precondition: beginFrame must have been called; c3dFrameBegin must be open.
+    if not boxy.frameBegun:
+      raise newException(BoxyError, "beginFrame has not been called")
+    boxy.flush()
+    # Increment layerNum only AFTER createLayerTarget and bindTarget both succeed,
+    # so a VRAM-budget failure (createLayerTarget raises) leaves layerNum consistent.
+    let nextNum = boxy.layerNum + 1
+    if nextNum >= boxy.layerRTs.len:
+      boxy.layerRTs.add(boxy.backend.createLayerTarget(boxy.frameSize.x, boxy.frameSize.y))
+    # Switch the active citro3d render target to the layer RT.
+    # bindTarget calls C3D_FrameDrawOn and clears to transparent black unconditionally,
+    # matching GL pushLayer's clearColor() on every push.
+    boxy.backend.bindTarget(boxy.layerRTs[nextNum].rt)
+    boxy.layerNum = nextNum
+
+  proc popLayer*(
+    boxy: Boxy,
+    tint = color(1, 1, 1, 1),
+    blendMode: BlendMode = NormalBlend
+  ) =
+    ## Pops the current RTT layer and composites it onto the next layer or screen.
+    ##
+    ## Flushes any pending atlas draws to the layer, then calls compositeLayer to
+    ## blend the layer texture onto the destination:
+    ##   - If this is the outermost layer (layerNum == 0 after decrement): composites
+    ##     onto the physical top screen via the screenRt set by setScreenTarget.
+    ##
+    ## For the screen destination, compositeLayer uses topScreenOrthoProj (tilted)
+    ## so the composited layer appears upright on the rotated physical LCD.
+    ##
+    ## ds3 CONSTRAINT: only a single, non-nested layer pair is supported per C3D frame.
+    ## The citro3d quad batch may only flush once per frame (linearAlloc vertex buffer);
+    ## nested pushLayer/popLayer calls would require multiple flushes and corrupt the batch.
+    ## The ds3 flush guard (ds3FlushUsed) enforces this — a second non-empty flush raises.
+    ##
+    ## Precondition: pushLayer must have been called (layerNum >= 0).
+    ## setScreenTarget must have been called before the outermost popLayer.
+    if boxy.layerNum == -1:
+      raise newException(BoxyError, "popLayer called without pushLayer")
+    boxy.flush()
+    let srcTex = boxy.layerRTs[boxy.layerNum].tex
+    dec boxy.layerNum
+    let (dstRt, dstTex) = if boxy.layerNum >= 0:
+      (boxy.layerRTs[boxy.layerNum].rt, boxy.layerRTs[boxy.layerNum].tex)
+    else:
+      (defaultRenderTarget(), noTextureHandle())  # screen — compositeLayer uses screenRt
+    boxy.backend.compositeLayer(srcTex, dstRt, dstTex, blendMode, tint,
+                                boxy.frameSize, boxy.atlasSize)
+
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
   ## Starts a new frame.
   ## On ds3, `clearFrame` is not honored — the app owns the frame lifecycle
@@ -1055,6 +1129,8 @@ proc beginFrame*(boxy: Boxy, frameSize: IVec2, proj: Mat4, clearFrame = true) =
     glViewport(0, 0, boxy.frameSize.x, boxy.frameSize.y)
     if clearFrame:
       boxy.clearColor()
+  else:
+    boxy.ds3FlushUsed = false  # reset per-frame flush budget
 
 proc beginFrame*(boxy: Boxy, frameSize: IVec2, clearFrame = true) {.inline.} =
   beginFrame(
