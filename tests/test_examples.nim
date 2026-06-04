@@ -1,27 +1,19 @@
 import std/[os, osproc, strutils]
 
 const ignore = [
-  # Needs extra dependencies to be installed.
+  # Needs extra dependencies to be installed (windowing libs not in CI).
   "basic_glfw.nim",
   "basic_sdl2.nim",
   "basic_glut.nim",
-  # TODO: Needs to be fixed.
-  "layer_as_image.nim",
-  # Require --define:ds3 (devkitARM cross-compilation); use scripts/build_3ds.sh.
-  "blank_3ds.nim",
-  "atlas_compile_3ds.nim",
-  "basic_3ds.nim",
-  "milestone2_3ds.nim",
-  "milestone3_3ds.nim",
-  "milestone4_3ds.nim",
-  "milestone6_3ds.nim",
 ]
 
-# Scan for files.
+# Scan for files, excluding ds3-only targets (require devkitARM cross-compilation;
+# use scripts/build_3ds.sh) and windowing-lib-dependent examples above.
 var files: seq[string]
 for file in walkDir("examples"):
-  if file.kind == pcFile and 
-    file.path.endsWith(".nim") and 
+  if file.kind == pcFile and
+    file.path.endsWith(".nim") and
+    not file.path.extractFilename.endsWith("_3ds.nim") and
     file.path.extractFilename notin ignore:
       files.add(file.path)
 
