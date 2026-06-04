@@ -10,7 +10,7 @@
 #   All other modes              — warn once per mode per session, fall back
 #                                  to NormalBlend (warnedBlendModes set)
 # Desktop consumers of blendingMain / atlasVert / atlasMain / maskMain are
-# already guarded in boxy.nim (boxy-25q tracks the remaining ds3 seam).
+# already guarded in boxy.nim under `when not defined(ds3)`.
 
 when not defined(ds3):
   import shady, vmath

@@ -1,7 +1,7 @@
 ## GLSL blur-effect shader procs (blurXMain, blurYMain).
 ## Desktop/OpenGL only — the entire module is guarded under
-## when not defined(ds3). On 3DS, effects will use PICA200 shbins;
-## this shady-DSL module is not compiled for ds3.
+## when not defined(ds3). Blur effects are unavailable on 3DS (infeasible
+## without fragment shaders); this shady-DSL module is not compiled for ds3.
 
 when not defined(ds3):
   import shady, vmath
