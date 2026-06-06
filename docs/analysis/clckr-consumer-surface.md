@@ -17,11 +17,12 @@ not assumed.
 
 - **All four asks pass.** The pin builds, the bindings are importable, windy is
   not pulled in, and pixie font rasterization (`readFont`/`typeset`/`fillText` →
-  `addImage`) **compiles and links cleanly on ds3**.
+  `addImage`) **compiles, links, AND renders on ds3** — confirmed on **physical
+  3DS hardware** 2026-06-06 (not just link-time).
 - The full clckr surface (drawRect ×2, a camera-transformed sprite, a pixie-text
   `addImage`, both `drawImage` overloads) is exercised in one layer-free frame by
   `examples/clckr_surface_3ds.nim`, which builds to `build/clckr_surface_3ds.3dsx`
-  with exit 0 via `scripts/build_3ds.sh`.
+  with exit 0 via `scripts/build_3ds.sh` and renders correctly on hardware.
 - Re-pin to the new tip only if you want the example + this doc; the **API is
   unchanged from `3a05542`**.
 
@@ -174,7 +175,7 @@ into ds3 builds and works.
 |---|---|
 | CPU pixel ops (`newImage`, `fill`, `fillPath`, `draw`) | ✅ working |
 | PNG decode from `romfs:/` (`readImage`) | ✅ working (basic_3ds + keystone) |
-| **Font rasterization** (`readTypeface`/`newFont`/`typeset`/`fillText`) | ✅ **compiles + links cleanly** — see below |
+| **Font rasterization** (`readTypeface`/`newFont`/`typeset`/`fillText`) | ✅ **renders on physical 3DS hardware** (2026-06-06) — see below |
 | GPU readback (`getImage` / read-from-texture) | ❌ unsupported on ds3 |
 
 ### Ask #3 — font path, confirmed at build/link
@@ -192,14 +193,12 @@ devkitARM/newlib/`--gc:arc` toolchain — now compiles and links with no unresol
 symbol. Reading a `.ttf` from `romfs:/` is a plain `readFile` (TTF is not
 zippy-compressed), and PNG-decode-from-romfs was already proven.
 
-Note the link is genuinely weaker than runtime here: `build_3ds.sh` provides
-**empty `libdl.a` / `librt.a` stubs**, so code referencing those symbols links and
-then crashes at runtime. The pixie font path is therefore **"compiles and links
-cleanly; runtime render unverified pending the Azahar step"** — clckr can proceed
-on it, but the visual confirmation below is what upgrades it to fully proven. As of
-2026-06-06 nothing suggests a runtime problem; if the Azahar text render ever
-fails while rects+sprite render, escalate that as a runtime-only font issue (the
-rest of the surface is independent of the font path).
+The link is genuinely weaker than runtime here (`build_3ds.sh` provides **empty
+`libdl.a` / `librt.a` stubs**, so symbols from those link then crash at runtime),
+so a runtime render was the deciding test — and it passed: **on physical 3DS
+hardware (2026-06-06) the "clckr 3DS" text image renders on the top screen.**
+pixie's OpenType parse + glyph rasterization works end-to-end on ds3, not just at
+link time. clckr can rely on the font path.
 
 ### Remaining manual confirmation (not a blocker)
 Build/link is proven in CI; the **visual** render is a documented hands-on step
@@ -229,9 +228,13 @@ Confirm on the top screen, then record the result here:
 
 Exit via **START**.
 
-> **Manual result (2026-06-06):** _pending hands-on Azahar run._ The automated
-> gate (cross-compile + link → `.3dsx`, exit 0) is green; this visual step is a
-> documented confirmation, not a CI gate. Update this line after running.
+> **Manual result (2026-06-06): ✅ confirmed on physical 3DS hardware.** The
+> "clckr 3DS" pixie-text image renders on the top screen, the light-blue button
+> `drawRect` renders, and the `test.png` sprite renders scaled ×2 and translated
+> by the camera transform (drawn via the `drawImage(rect=)` overload). The
+> full-screen background `drawRect` is intentionally near the clear color, so it
+> blends in rather than reading as a separate fill. All three exercised paths
+> (drawRect, transformed sprite via rect= overload, pixie text) render correctly.
 
 ---
 
