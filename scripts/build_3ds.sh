@@ -117,31 +117,50 @@ nim compile \
   -o:"$BUILD_DIR/$APP_NAME.elf" \
   "$TARGET"
 
-# --- stage 3: SMDH metadata (optional, requires icon assets) ---
+# --- stage 3: SMDH metadata ---
+# 3dsxtool REQUIRES an SMDH whenever --romfs is passed (otherwise it fails with
+# the misleading "Cannot open SMDH file!"). Examples that read from romfs:/ — e.g.
+# basic_3ds.nim, clckr_surface_3ds.nim — therefore need an SMDH. We always try to
+# generate one, falling back to devkitPro's stock icon so a fresh clone builds
+# without committing binary icon assets (assets/ is .gitignore'd).
+#
 # NOTE: bannertool and smdhtool arg order validated against bannertool 1.1.1 and
 # smdhtool 0.0.1. Verify with --help if your installed versions differ.
+# The small (24x24) icon is OPTIONAL for smdhtool; bannertool needs both.
 ICON48="${ICON48:-assets/icon48.png}"
 ICON24="${ICON24:-assets/icon24.png}"
+# Fall back to libctru's stock 48x48 icon when no project icon is provided.
+DEFAULT_ICON="$DEVKITPRO/libctru/default_icon.png"
+if [[ ! -f "$ICON48" && -f "$DEFAULT_ICON" ]]; then
+  ICON48="$DEFAULT_ICON"
+fi
 SMDH_TITLE="${SMDH_TITLE:-$APP_NAME}"
 SMDH_DESC="${SMDH_DESC:-Boxy 2D rendering}"
 SMDH_AUTHOR="${SMDH_AUTHOR:-boxy}"
 
-if [[ -f "$ICON48" && -f "$ICON24" ]]; then
-  echo "Generating SMDH metadata..."
-  if command -v bannertool &>/dev/null; then
+if [[ -f "$ICON48" ]]; then
+  echo "Generating SMDH metadata (icon: $ICON48)..."
+  if command -v bannertool &>/dev/null && [[ -f "$ICON24" ]]; then
     bannertool makesmdh \
       -s "$SMDH_TITLE" -l "$SMDH_DESC" -p "$SMDH_AUTHOR" \
       -i "$ICON48" -si "$ICON24" \
       -o "$BUILD_DIR/$APP_NAME.smdh"
   elif command -v smdhtool &>/dev/null; then
-    smdhtool --create "$SMDH_TITLE" "$SMDH_DESC" "$SMDH_AUTHOR" \
-      "$ICON48" "$BUILD_DIR/$APP_NAME.smdh" "$ICON24"
+    # smdhtool's trailing small-icon arg is optional; pass ICON24 only if present.
+    if [[ -f "$ICON24" ]]; then
+      smdhtool --create "$SMDH_TITLE" "$SMDH_DESC" "$SMDH_AUTHOR" \
+        "$ICON48" "$BUILD_DIR/$APP_NAME.smdh" "$ICON24"
+    else
+      smdhtool --create "$SMDH_TITLE" "$SMDH_DESC" "$SMDH_AUTHOR" \
+        "$ICON48" "$BUILD_DIR/$APP_NAME.smdh"
+    fi
   else
     echo "Warning: neither bannertool nor smdhtool found — skipping SMDH." >&2
+    echo "  3dsxtool will fail if this target reads from romfs:/." >&2
   fi
 else
-  echo "Note: icon assets not found ($ICON48, $ICON24) — building .3dsx without SMDH." >&2
-  echo "  Set ICON48 and ICON24 env vars to provide icons." >&2
+  echo "Note: no icon found (looked for $ICON48 and $DEFAULT_ICON) — building without SMDH." >&2
+  echo "  Set ICON48 (and optionally ICON24) to provide one. romfs targets require an SMDH." >&2
 fi
 
 # --- stage 4: package .3dsx ---
