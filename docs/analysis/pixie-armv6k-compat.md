@@ -1,5 +1,12 @@
 # pixie / nimsimd / zippy Cross-Compilation for ARMv6K
 
+> **Superseded re: import guarding (2026-06-06).** The "Recommended Path Forward"
+> below (guard out `import pixie` on ds3, add a `pixie_stub.nim`) was **not taken**.
+> pixie is compiled into ds3 builds and works — including CPU font rasterization
+> (`readFont`/`typeset`/`fillText`), proven by `examples/clckr_surface_3ds.nim`
+> linking to a `.3dsx`. See `docs/analysis/clckr-consumer-surface.md` for the live
+> ds3 pixie status; treat that as current truth over this file's recommendation.
+
 Analysis of whether these packages can cross-compile for the Nintendo 3DS (ARMv6K / arm-none-eabi-gcc / --gc:arc).
 
 > **Verification status:** SIMD guard analysis verified against installed sources (pixie 6.1.0, nimsimd 1.3.2, zippy 0.10.19). Unconditional import locations verified against `src/boxy.nim` and `src/boxy/textures.nim`. All runtime verdicts are **inferred, not executed** — nothing has been run on 3DS hardware or an emulator. The one test that converts hypotheses to facts: cross-compile a trivial Nim program calling `newImage`, `isOneColor`, and `[]` with `-d:ds3` against the devkitARM toolchain and link it.
