@@ -18,6 +18,13 @@ jobs:
 
     - run: nimby sync -g nimby.lock
 
+    # PICA200 shader ABI gate. Tier 1 only: verifies the committed
+    # shaders/render2d.v.pica still carries the citro3d ABI tokens. Needs no
+    # picasso and no Shady branch (both absent on CI) — the assemble oracle and
+    # the -d:picaDriftCheck regen/diff self-skip. Catches accidental corruption
+    # of the committed shader's ABI surface.
+    - run: nim c -r tests/test_render2d_pica.nim
+
     - run: nim c examples/animated_gif.nim
     - run: nim c examples/atlas_packing.nim
     - run: nim c examples/basic_windy.nim

@@ -97,6 +97,31 @@ cp nim_3ds.cfg nim.cfg
 
 trap 'rm -f libdl.a librt.a nim.cfg' EXIT
 
+# --- stage 0 (opt-in): regenerate shaders/render2d.v.pica from its Nim source ---
+# Off by default — the committed shaders/render2d.v.pica is authoritative, so a
+# normal/CI build needs neither Nim-on-host nor the (unmerged) Shady toPica
+# branch. Set REGEN_SHADER=1 to regenerate from tools/gen_render2d_pica.nim
+# before assembling. SHADY_SRC overrides the Shady checkout path.
+# Fails SOFT: a regen failure only warns. Note `toPica` runs at the generator's
+# Nim-compile time (a `const`), so a failed regen aborts BEFORE the file is
+# rewritten — the committed file is left intact (no partial/truncated write).
+# If a successful-but-wrong regen ever emitted a bad shader, stage 1's picasso
+# call below fails loudly (exit 1); a broken shader can never ship silently.
+if [[ "${REGEN_SHADER:-0}" == "1" ]]; then
+  SHADY_SRC="${SHADY_SRC:-$HOME/git/shady/src}"
+  if command -v nim &>/dev/null && [[ -d "$SHADY_SRC" ]]; then
+    echo "Regenerating shaders/render2d.v.pica (REGEN_SHADER=1)..."
+    if nim r --hints:off -d:shadyNoPixie --path:"$SHADY_SRC" \
+        tools/gen_render2d_pica.nim shaders/render2d.v.pica; then
+      echo "Regenerated shaders/render2d.v.pica from tools/gen_render2d_pica.nim"
+    else
+      echo "Warning: shader regen failed — keeping committed shaders/render2d.v.pica." >&2
+    fi
+  else
+    echo "Warning: REGEN_SHADER=1 but nim or Shady src ($SHADY_SRC) missing — keeping committed .v.pica." >&2
+  fi
+fi
+
 # --- stage 1: PICA200 vertex shader (must precede Nim compile so staticRead finds the .shbin) ---
 if [[ -f "shaders/render2d.v.pica" ]]; then
   if command -v picasso &>/dev/null; then
