@@ -1,54 +1,59 @@
-import opengl
+## GPU buffer management. Desktop/OpenGL only — the entire module is
+## guarded under when not defined(ds3). On 3DS, buffer management is
+## handled internally by the citro3d backend (linearAlloc vertex/index buffers).
 
-type
-  BufferKind* = enum
-    bkSCALAR, bkVEC2, bkVEC3, bkVEC4, bkMAT2, bkMAT3, bkMAT4
+when not defined(ds3):
+  import opengl
 
-  Buffer* = ref object
-    count*: int
-    target*, componentType*: GLenum
-    kind*: BufferKind
-    normalized*: bool
-    bufferId*: GLuint
+  type
+    BufferKind* = enum
+      bkSCALAR, bkVEC2, bkVEC3, bkVEC4, bkMAT2, bkMAT3, bkMAT4
 
-func size*(componentType: GLenum): Positive =
-  case componentType:
-    of cGL_BYTE, cGL_UNSIGNED_BYTE:
-      1
-    of cGL_SHORT, cGL_UNSIGNED_SHORT:
-      2
-    of cGL_INT, GL_UNSIGNED_INT, cGL_FLOAT:
-      4
-    else:
-      raise newException(Exception, "Unexpected componentType")
+    Buffer* = ref object
+      count*: int
+      target*, componentType*: GLenum
+      kind*: BufferKind
+      normalized*: bool
+      bufferId*: GLuint
 
-func componentCount*(bufferKind: BufferKind): Positive =
-  case bufferKind:
-    of bkSCALAR:
-      1
-    of bkVEC2:
-      2
-    of bkVEC3:
-      3
-    of bkVEC4, bkMAT2:
-      4
-    of bkMAT3:
-      9
-    of bkMAT4:
-      16
+  func size*(componentType: GLenum): Positive =
+    case componentType:
+      of cGL_BYTE, cGL_UNSIGNED_BYTE:
+        1
+      of cGL_SHORT, cGL_UNSIGNED_SHORT:
+        2
+      of cGL_INT, GL_UNSIGNED_INT, cGL_FLOAT:
+        4
+      else:
+        raise newException(Exception, "Unexpected componentType")
 
-proc bindBufferData*(buffer: Buffer, data: pointer) =
-  if buffer.bufferId == 0:
-    glGenBuffers(1, buffer.bufferId.addr)
+  func componentCount*(bufferKind: BufferKind): Positive =
+    case bufferKind:
+      of bkSCALAR:
+        1
+      of bkVEC2:
+        2
+      of bkVEC3:
+        3
+      of bkVEC4, bkMAT2:
+        4
+      of bkMAT3:
+        9
+      of bkMAT4:
+        16
 
-  let byteLength = buffer.count *
-    buffer.kind.componentCount() *
-    buffer.componentType.size()
+  proc bindBufferData*(buffer: Buffer, data: pointer) =
+    if buffer.bufferId == 0:
+      glGenBuffers(1, buffer.bufferId.addr)
 
-  glBindBuffer(buffer.target, buffer.bufferId)
-  glBufferData(
-    buffer.target,
-    byteLength,
-    data,
-    GL_STATIC_DRAW
-  )
+    let byteLength = buffer.count *
+      buffer.kind.componentCount() *
+      buffer.componentType.size()
+
+    glBindBuffer(buffer.target, buffer.bufferId)
+    glBufferData(
+      buffer.target,
+      byteLength,
+      data,
+      GL_STATIC_DRAW
+    )

@@ -51,7 +51,23 @@ when defined(emscripten):
     echo "To run emscripten, use:"
     echo "emrun examples/" & projectName() & ".html"
 
-when not defined(debug):
+when defined(ds3):
+  --mm:arc                          # --mm:arc implies --gc:arc; no need to set both
+  --define:useMalloc
+  --define:nimAllocPagesViaMalloc
+  --define:noSignalHandler
+  --threads:off                     # no pthreads on 3DS; prevents -pthread linker flag
+  --opt:size
+  # --cpu:arm and --os:linux are set in nim_3ds.cfg; defining them here too would
+  # cause redundancy and possible drift — the cfg is the single source of truth.
+  # NOTE: --noMain:on is intentionally absent. Nim generates main() which calls
+  # NimMain() then top-level code. This is correct for milestone-1 gate tests.
+  # When boxy moves to a proper citro3d game loop, add a dedicated entry-point
+  # file that calls NimMain() explicitly and remove this note.
+  --define:noOpenGL
+  --define:ds3NoWindy
+
+when not defined(debug) and not defined(ds3):
   --define:noAutoGLerrorCheck
   --define:release
   --define:ssl
