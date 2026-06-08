@@ -18,6 +18,11 @@ jobs:
 
     - run: nimby sync -g nimby.lock
 
+    # TEV config guard (tier 1): the citro3d backend's hand-wired modulate/replace
+    # TEV constants must stay intact. CI-safe — no picasso/Shady branch needed
+    # (the toTev tier-2 half self-skips without -d:ds3).
+    - run: nim c -r tests/test_tev_config.nim
+
     - run: nim c examples/animated_gif.nim
     - run: nim c examples/atlas_packing.nim
     - run: nim c examples/basic_windy.nim
