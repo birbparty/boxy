@@ -184,10 +184,10 @@ proc clearSubImage*(texture: Texture, x, y: int, size: IVec2) =
 
 proc readImage*(texture: Texture): Image =
   ## Reads the data of the texture back.
-  when defined(emscripten):
+  when defined(emscripten) or defined(vita):
     raise newException(
       Exception,
-      "readImage is not supported on emscripten due to security reasons"
+      "readImage is not supported on this GLES target (no glGetTexImage)"
     )
   else:
     let image = newImage(texture.width, texture.height)

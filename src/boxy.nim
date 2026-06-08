@@ -229,6 +229,41 @@ proc newBoxy*(
       ("spreadYMain", toGLSL(spreadYMain, "300 es", "precision highp float;\n"))
     )
 
+  elif defined(vita):
+    # Sony PS Vita: vitaGL's SceShaccCg crashes linking GLSL ES 3.00, so emit GLSL
+    # ES 1.00 via shady's glslES1 target (the overload emits #version 100 + the
+    # mandatory fragment precision). blur uses the constant-loop Es1 variants
+    # (blurXMainEs1/blurYMainEs1) — the uniform-bounded blurXMain/blurYMain are
+    # illegal in ES 1.00. See .agents/plans/vita-support/.
+    result.atlasShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("atlasMain", toGLSL(atlasMain, glslES1))
+    )
+    result.maskShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("maskMain", toGLSL(maskMain, glslES1))
+    )
+    result.blendShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("blendingMain", toGLSL(blendingMain, glslES1))
+    )
+    result.blurXShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("blurXMainEs1", toGLSL(blurXMainEs1, glslES1))
+    )
+    result.blurYShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("blurYMainEs1", toGLSL(blurYMainEs1, glslES1))
+    )
+    result.spreadXShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("spreadXMainEs1", toGLSL(spreadXMainEs1, glslES1))
+    )
+    result.spreadYShader = newShader(
+      ("atlasVert", toGLSL(atlasVert, glslES1)),
+      ("spreadYMainEs1", toGLSL(spreadYMainEs1, glslES1))
+    )
+
   else:
     result.atlasShader = newShader(
       ("atlasVert", toGLSL(atlasVert, "410", "")),
@@ -390,7 +425,7 @@ proc grow(boxy: Boxy) =
     for image in images:
       echo "  Image ", image[0], " size: ", image[1].size.x, "x", image[1].size.y
       inc i
-    when not defined(emscripten):
+    when not (defined(emscripten) or defined(vita)):
       boxy.atlasTexture.writeFile("tmp/atlas.png")
     raise newException(
       BoxyError,

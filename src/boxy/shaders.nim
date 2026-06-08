@@ -477,13 +477,20 @@ proc bindAttrib*(
           nil
         )
       else:
-        glVertexAttribIPointer(
-          attrib.location.GLuint,
-          buffer.kind.componentCount().GLint,
-          buffer.componentType,
-          0,
-          nil
-        )
+        when defined(vita):
+          # vitaGL is GLES2: no glVertexAttribIPointer (GLES3). boxy's attributes are
+          # all float/normalized, so this integer-attribute branch is never taken — guard
+          # it out so the symbol isn't referenced at link.
+          raise newException(Exception,
+            "integer vertex attributes are not supported on Vita (GLES2)")
+        else:
+          glVertexAttribIPointer(
+            attrib.location.GLuint,
+            buffer.kind.componentCount().GLint,
+            buffer.componentType,
+            0,
+            nil
+          )
 
       glEnableVertexAttribArray(attrib.location.GLuint)
       return

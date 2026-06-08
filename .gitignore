@@ -17,3 +17,12 @@ nimcache
 *.dll
 *.out
 tmp/
+
+# Vita build artifacts (scripts/build_vita.sh — nim.cfg is a transient copy of nim_vita.cfg)
+nim.cfg
+*.vpk
+*.velf
+eboot.bin
+param.sfo
+librt.a
+libdl.a
