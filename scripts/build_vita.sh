@@ -36,6 +36,18 @@ trap cleanup EXIT
 
 # nim_vita.cfg -> nim.cfg so Nim auto-discovers the Vita toolchain/flags.
 cp nim_vita.cfg nim.cfg
+
+# vitaGL needs the dedicated-CDRAM display-surface patch (birbparty/vitaGL#1) or the
+# screen is black on real hardware. Until that's in the sysroot, prefer a locally-built
+# patched vitaGL if present. $HOME does NOT expand inside nim.cfg, so inject the -L here
+# (shell-expanded) at the TOP of nim.cfg, before the sysroot -L, so -lvitaGL resolves to
+# the patched copy. Override the location with BOXY_VITAGL_DIR; skipped if absent.
+VITAGL_DIR="${BOXY_VITAGL_DIR:-$HOME/git/vitaGL}"
+if [[ -f "$VITAGL_DIR/libvitaGL.a" ]]; then
+  printf '%s\n' "--passL:\"-L$VITAGL_DIR\"" | cat - nim.cfg > nim.cfg.tmp && mv nim.cfg.tmp nim.cfg
+  echo "[build_vita] using locally-patched vitaGL: $VITAGL_DIR/libvitaGL.a"
+fi
+
 # Nim injects -lrt for os:linux; Vita has no librt. Empty stub on the link path (-L.).
 "$AR" rcs librt.a
 
