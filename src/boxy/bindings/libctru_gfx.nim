@@ -12,7 +12,8 @@
 ## The -I/opt/devkitpro/libctru/include path is set by nim_3ds.cfg.
 ##
 ## Usage: import only when --define:ds3 is active.
-## Milestone 2 (boxy-5xs) uses these bindings to load render2d.shbin and call C3D_Init.
+## Milestone 2 (boxy-5xs) uses these bindings to load the inline-assembled
+## render2d shader (render2d_pica.render2dShbin) and call C3D_Init.
 
 when not defined(ds3):
   {.error: "libctru_gfx.nim must be compiled with --define:ds3 (use scripts/build_3ds.sh)".}

@@ -15,11 +15,11 @@ when not defined(ds3):
 
 import boxy/bindings/libctru_gfx
 import boxy/bindings/citro3d
+import boxy/backends/render2d_pica  # render2dShbin: assembled inline via Shady toPicaShbin
 
-# Embed render2d.shbin at compile time.  Shader is compiled in stage 1 of build_3ds.sh,
-# so the file exists before Nim compilation begins.
-# Path is relative to this source file's directory (examples/).
-const shbinRaw = staticRead("../build/render2d.shbin")
+# Shader .shbin is assembled at Nim-compile time from the render2dVert proc in
+# render2d_pica.nim (Shady toPicaShbin) — no separate file or build stage.
+const shbinRaw = render2dShbin
 
 proc fail(dvlb: ptr DVLB_s = nil, prog: ptr ShaderProgram_s = nil) {.noreturn.} =
   if prog != nil: discard shaderProgramFree(prog)

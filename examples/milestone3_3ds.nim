@@ -33,8 +33,10 @@ when not defined(ds3):
 import boxy/bindings/libctru_gfx
 import boxy/bindings/citro3d
 import boxy/backends/citro3d_backend  # swizzleTileIntoAtlas
+import boxy/backends/render2d_pica    # render2dShbin: assembled inline via Shady toPicaShbin
 
-const shbinRaw = staticRead("../build/render2d.shbin")
+# Shader .shbin assembled at Nim-compile time from render2dVert (Shady toPicaShbin).
+const shbinRaw = render2dShbin
 
 # GX transfer flags: RGBA8 framebuffer → RGB8 display output.
 # GX_TRANSFER_IN_FORMAT(RGBA8=0)=0 | GX_TRANSFER_OUT_FORMAT(RGB8=1)=0x1000
@@ -47,7 +49,7 @@ const DISPLAY_FLAGS = 0x1000'u32
 # See that function for the full derivation and PICA200 layout details.
 let projMat = topScreenOrthoProj(400f, 240f)
 
-# Vertex layout matching render2d.v.pica:
+# Vertex layout matching render2d_pica.nim render2dVert:
 #   v0 = position (x, y)      GPU_FLOAT × 2
 #   v1 = UV (u, v)            GPU_FLOAT × 2
 #   v2 = color (r, g, b, a)   GPU_UNSIGNED_BYTE × 4

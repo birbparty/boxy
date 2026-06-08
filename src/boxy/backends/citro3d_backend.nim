@@ -195,11 +195,13 @@ when defined(ds3):
   import vmath                    # IVec2, Vec2 (pixie imported at top-level for BlendMode/Color)
   import ../bindings/citro3d
   import ../bindings/libctru_gfx
+  import render2d_pica            # render2dShbin: shader assembled inline via Shady toPicaShbin
   export citro3d
 
-  # Shader binary loaded at compile time; copied into b.shbinData at first
+  # Shader .shbin assembled at Nim-compile time from the render2dVert proc in
+  # render2d_pica.nim (Shady toPicaShbin). Copied into b.shbinData at first
   # initBlitShader call so DVLB_s can hold a stable heap pointer into it.
-  const shbinDataConst = staticRead("../../../build/render2d.shbin")
+  const shbinDataConst = render2dShbin
 
   # ---------------------------------------------------------------------------
   # VRAM budget for the PICA200 GPU:
@@ -235,7 +237,7 @@ when defined(ds3):
     ## Derivation: 4 vertices × 10921 = 43684 < 65536 (uint16 index range).
 
   # Shared render vertex layout for all citro3d draw calls, matching
-  # render2d.v.pica register assignment:
+  # render2d_pica.nim (render2dVert) register assignment:
   #   v0 = position (x, y) as GPU_FLOAT × 2
   #   v1 = UV (u, v) as GPU_FLOAT × 2
   #   v2 = color (r, g, b, a) as GPU_UNSIGNED_BYTE × 4
@@ -667,7 +669,7 @@ when defined(ds3):
     c3dFVUnifMtx4x4(GPU_VERTEX_SHADER_TYPE, b.projReg.int32,
                      cast[ptr C3D_Mtx](addr identMat[0]))
 
-    # Attribute layout matching render2d.v.pica (v0=pos, v1=uv, v2=color).
+    # Attribute layout matching render2d_pica.nim render2dVert (v0=pos, v1=uv, v2=color).
     var attrInfo: C3D_AttrInfo
     attrInfoInit(addr attrInfo)
     discard attrInfoAddLoader(addr attrInfo, 0, GPU_FLOAT_FORMAT, 2)
@@ -726,7 +728,7 @@ when defined(ds3):
       idx[i * 6 + 5] = uint16(base + 1)
     discard gspgpuFlushDataCache(b.quadIdxBuf, idxBytes)
 
-    # Pre-configure AttrInfo: same register layout as render2d.v.pica.
+    # Pre-configure AttrInfo: same register layout as render2d_pica.nim render2dVert.
     attrInfoInit(addr b.quadAttrInfo)
     discard attrInfoAddLoader(addr b.quadAttrInfo, 0, GPU_FLOAT_FORMAT, 2)
     discard attrInfoAddLoader(addr b.quadAttrInfo, 1, GPU_FLOAT_FORMAT, 2)
