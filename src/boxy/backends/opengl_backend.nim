@@ -44,21 +44,66 @@ type
 proc newOpenGLBackend*(emscripten = false): OpenGLBackend =
   result = OpenGLBackend()
 
-  let version = if emscripten: "300 es" else: "410"
-  let prefix  = if emscripten: "precision highp float;\n" else: ""
-
-  result.atlasShader = newShader(
-    ("atlasVert",    toGLSL(atlasVert,    version, prefix)),
-    ("atlasMain",    toGLSL(atlasMain,    version, prefix))
-  )
-  result.maskShader = newShader(
-    ("atlasVert",    toGLSL(atlasVert,    version, prefix)),
-    ("maskMain",     toGLSL(maskMain,     version, prefix))
-  )
-  result.blendShader = newShader(
-    ("atlasVert",    toGLSL(atlasVert,    version, prefix)),
-    ("blendingMain", toGLSL(blendingMain, version, prefix))
-  )
+  when defined(vita):
+    # Vita's SceShaccCg (vitaGL) hard-crashes linking anything but GLSL ES 1.00:
+    # #version 300 es / 410 -> NULL SceGxmProgram -> data-abort inside glLinkProgram
+    # (sceGxmProgramGetParameterCount(NULL)). Emit GLSL ES 1.00 via shady's glslES1.
+    #
+    # CRITICAL: use the COMPILE-TIME GlslTarget overload toGLSL(s, glslES1), NOT the
+    # string overload toGLSL(s, version, prefix) with a runtime `let version`. The
+    # string overload is a macro that reads version.strVal at compile time; passing a
+    # runtime variable makes it read the IDENT name ("version") instead of the value,
+    # emitting a literal "#version version" with desktop-style in/out qualifiers —
+    # exactly the invalid shader SceShaccCg rejected. This mirrors boxy.nim's inline
+    # `elif defined(vita)` shader block (the proven Vita path); newOpenGLBackend lost
+    # the Vita case when c7eb5c7 was merged onto the Backend-interface refactor
+    # (b1817a8). (Desktop tolerates the bad string-overload shaders because GL
+    # compiles them lazily and fails soft; Vita's SceShaccCg aborts the process.)
+    result.atlasShader = newShader(
+      ("atlasVert",    toGLSL(atlasVert,    glslES1)),
+      ("atlasMain",    toGLSL(atlasMain,    glslES1))
+    )
+    result.maskShader = newShader(
+      ("atlasVert",    toGLSL(atlasVert,    glslES1)),
+      ("maskMain",     toGLSL(maskMain,     glslES1))
+    )
+    result.blendShader = newShader(
+      ("atlasVert",    toGLSL(atlasVert,    glslES1)),
+      ("blendingMain", toGLSL(blendingMain, glslES1))
+    )
+  else:
+    # Same macro pitfall as the Vita branch above, on the desktop/emscripten seam:
+    # toGLSL's string overload reads version/extra via .strVal at COMPILE time, so a
+    # runtime `let version` resolves to the IDENT NAME and emits a literal
+    # "#version version" — every shader here was broken the same way as Vita's, just
+    # failing soft (GL logs the compile error, draws emit nothing) instead of
+    # aborting. Branch at runtime, but pass LITERALS in each arm.
+    if emscripten:
+      result.atlasShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "300 es", "precision highp float;\n")),
+        ("atlasMain",    toGLSL(atlasMain,    "300 es", "precision highp float;\n"))
+      )
+      result.maskShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "300 es", "precision highp float;\n")),
+        ("maskMain",     toGLSL(maskMain,     "300 es", "precision highp float;\n"))
+      )
+      result.blendShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "300 es", "precision highp float;\n")),
+        ("blendingMain", toGLSL(blendingMain, "300 es", "precision highp float;\n"))
+      )
+    else:
+      result.atlasShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "410", "")),
+        ("atlasMain",    toGLSL(atlasMain,    "410", ""))
+      )
+      result.maskShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "410", "")),
+        ("maskMain",     toGLSL(maskMain,     "410", ""))
+      )
+      result.blendShader = newShader(
+        ("atlasVert",    toGLSL(atlasVert,    "410", "")),
+        ("blendingMain", toGLSL(blendingMain, "410", ""))
+      )
 
   # --- compositing VAO ---
   glGenVertexArrays(1, result.vao.addr)
