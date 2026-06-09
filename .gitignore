@@ -13,7 +13,24 @@ nimcache
 *.pdb
 *.ilk
 .*
+!.ralph
 *.dylib
 *.dll
 *.out
 tmp/
+build/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+assets/
+
+# Vita build artifacts (scripts/build_vita.sh — nim.cfg is a transient copy of nim_vita.cfg)
+nim.cfg
+*.vpk
+*.velf
+eboot.bin
+param.sfo
+librt.a
+libdl.a
